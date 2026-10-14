@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    labels: [dependencies]
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Type definitions must match the OLDEST Node we support (engines: >=22), not the newest,
+      # or code could use APIs that do not exist on Node 22 and still typecheck.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # Major compiler upgrades are done deliberately, by hand, with the whole suite and `pnpm smoke`.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    labels: [dependencies]
+    groups:
+      actions:
+        patterns: ["*"]

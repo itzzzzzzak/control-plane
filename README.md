@@ -2,7 +2,9 @@
 
 A self-hostable control plane for reliable agents and automations, built as a **modular monolith**: one repo, one process, one database, with strictly separated modules.
 
-> Status: day 0. Only the skeleton and the SyncCore design exist. Part of the Sept to Dec 2026 CTO plan; the capstone combines every module.
+> Status: early. The SyncCore engine (one-way sync with checkpoints, conflicts and dead letters, in-memory store) works and is tested; the Postgres store and the Zoho source come next. Part of a Sept to Dec 2026 engineering plan whose capstone combines every module.
+
+[![CI](https://github.com/itzzzzzzak/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/itzzzzzzak/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Shape
 
@@ -29,4 +31,12 @@ pnpm test      # build, boundary check, tests
 pnpm start
 ```
 
-Requires Node 22 or newer. Licensed MIT.
+Requires Node 22 or newer.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md). Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[MIT](LICENSE)
