@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 2 — PostgreSQL durability RFC
 
-Status: DESIGN + TEST PLAN ONLY. No PostgreSQL adapter is implemented. This branch must remain draft until green integration CI and security review.
+Status: IMPLEMENTED AND VERIFIED. Merge remains conditional on final-head CI and security review. See [operations](syncore-postgres-operations.md) for setup and recovery. The original design and verification matrix follow; completion evidence is recorded below.
 
 ## Existing Gate 1 review (base 1eeb295)
 
@@ -16,8 +16,8 @@ Status: DESIGN + TEST PLAN ONLY. No PostgreSQL adapter is implemented. This bran
 All tables are module-owned, prefix `syncore_`, keyed by `sync_name` for multi-tenant isolation.
 
 - `syncore_leases`: one row per sync, `epoch bigint` monotonically increases, `token uuid` nullable, `expires_at timestamptz` nullable. Never delete a lease row: retains fencing epoch after release/restart.
-- `syncore_state`: `sync_name PK`, `cursor text`, `max_seen timestamptz`, `watermark timestamptz` (precision/format conversion documented); `updated_at`.
-- `syncore_rows`: `(sync_name, source_id)` PK, `data jsonb`, `base_hash text`, `source_modified_at timestamptz`, `deleted boolean`.
+- `syncore_state`: `sync_name PK`, `cursor text`, `max_seen text`, `watermark text` (source timestamp strings are preserved exactly); `updated_at`.
+- `syncore_rows`: `(sync_name, source_id)` PK, `data jsonb`, `base_hash text`, `source_modified_at text`, `deleted boolean`.
 - `syncore_conflicts`: immutable `id uuid PK`, `sync_name`, `source_id`, `overwritten jsonb`, `applied jsonb`, `resolution`, `occurred_at`.
 - `syncore_dead_letters`: immutable `id uuid PK`, `sync_name`, `raw jsonb`, `reason`, `created_at`, `resolved_at` nullable. Retain resolved entries for audit; enumerate only unresolved entries.
 
@@ -69,3 +69,46 @@ Integration CI must provision PostgreSQL and run all these tests; never count sk
 ## Non-goals
 
 Not Zoho API adapter, bidirectional sync, event ordering/watermark redesign, UI, or workflow orchestration. Do not claim production readiness before multi-process recovery is validated.
+
+
+## Implementation and evidence
+
+- `postgres-store.ts`: parameterized `pg` adapter, explicit pool lifecycle, durable
+  rows/state/conflicts/dead letters, transactional fences at entry and commit decision.
+- Async `SyncTx` methods are awaited by the engine and both stores. Stable dead-letter
+  IDs resolve in the same transaction as replay writes; storage errors propagate.
+- `heartbeat.ts`: serialized renewal, terminal ownership loss, AbortSignal propagation,
+  cancelled fetch waits and timer cleanup. Cleanup failure cannot replace a committed result.
+- Connection checkout, query/lock/idle timeouts and callback deadlines bound failures;
+  escaped transaction handles reject subsequent operations. Payload byte limits apply.
+- First complete integration run: [CI 39026819792](https://github.com/itzzzzzzak/control-plane/actions/runs/39026819792),
+  commit `3493b479488925dcd8bc03d57e42af5b3a27f186`, Node 22/24 + PostgreSQL 17,
+  26 passing tests, zero skipped, dependency audit clean. This is evidence for that
+  commit only; subsequent adversarial regressions require their own green run.
+- Integration coverage includes independent processes competing for ownership, SIGKILL
+  before commit, process death after commit before runner response, pool reopen and
+  checkpoint resume, rollback of rows/state/dead letters, stale epochs/releases,
+  sync-name isolation and SQL injection-shaped identifiers.
+- Additional review regressions cover renewal blocked across expiry, a real DB heartbeat
+  during slow fetch, independent sync transactions, payload limits, backend termination,
+  pool exhaustion, callback deadlines and escaped transaction handles.
+
+## Review scope and remaining limits
+
+All database operations use bind parameters; function privileges are invoker-only.
+No public API, credential broker, cross-user authorization or production Zoho integration
+is introduced. Raw SQL credentials are trusted. Source revision ordering and late-event
+watermark behavior remain the next independent gate. Audit-list pagination and deployment
+telemetry remain operational work; do not expose unbounded list methods directly as a
+public API. See the operations guide for deployment constraints and recovery semantics.
+
+Final implementation evidence: [CI 39026963538](https://github.com/itzzzzzzak/control-plane/actions/runs/39026963538),
+commit `c737bc892a7ffb3a965eec408f163d66e0bf3592`, passed Node 22 and 24 against
+PostgreSQL 17: **32 tests passed, zero skipped, zero failed**. This includes all
+additional adversarial regressions listed above. Both dependency audits reported no
+known vulnerabilities. The final documentation commit must also pass exact-head CI.
+
+Review findings corrected before merge: replay's split commit and swallowed storage
+failures; renewal clock evaluation before lock acquisition; expired commit fencing;
+leaked transaction handles; unbounded transaction callbacks and query waits; cleanup
+errors replacing committed outcomes. No unresolved critical findings in Gate 2 scope.

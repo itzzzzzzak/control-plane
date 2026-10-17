@@ -2,7 +2,7 @@
 
 A self-hostable control plane for reliable agents and automations, built as a **modular monolith**: one repo, one process, one database, with strictly separated modules.
 
-> Status: early. The SyncCore engine (one-way sync with checkpoints, conflicts and dead letters, in-memory store) works and is tested; the Postgres store and the Zoho source come next. Part of a Sept to Dec 2026 engineering plan whose capstone combines every module.
+> Status: early. SyncCore implements one-way sync with checkpoints, conflicts, atomic dead-letter replay, PostgreSQL persistence, fenced leases and heartbeat. Real PostgreSQL crash/restart tests run in CI. Incremental boundary correctness and a live Zoho source are subsequent milestones. Part of a Sept to Dec 2026 engineering plan whose capstone combines every module.
 
 [![CI](https://github.com/itzzzzzzak/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/itzzzzzzak/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -31,7 +31,7 @@ pnpm test      # build, boundary check, tests
 pnpm start
 ```
 
-Requires Node 22 or newer.
+Requires Node 22 or newer. PostgreSQL setup and recovery: [operations guide](docs/modules/syncore-postgres-operations.md). Local tests without `SYNCORE_TEST_DATABASE_URL` skip database integration tests; CI requires them.
 
 ## Contributing
 
@@ -40,3 +40,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.
 ## License
 
 [MIT](LICENSE)
+
