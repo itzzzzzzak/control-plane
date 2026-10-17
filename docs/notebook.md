@@ -12,3 +12,22 @@
 
 ## Concepts encountered
 - Modular monolith: one deployable, modules with enforced public entry points.
+
+
+## 2026-10-17 reliability gates
+
+- Gates 2–4 merged through PRs #2, #3 and #4. Exact-head CI ran Node 22/24 with
+  PostgreSQL 17; final suite: 39 passed, zero skipped. Author-side adversarial reviews
+  were recorded; no independent maintainer approval was claimed.
+- A lease renewal can wait on a row lock after its predicate was evaluated. Lock first,
+  then evaluate database wall time; otherwise an expired owner may be revived.
+- Crash durability needs process death and commit-response-loss tests, not merely
+  pool mocks. Stable dead-letter IDs allow replay and resolution to commit together.
+- Preserve deletion versions, including unseen IDs. A timestamp-only source cannot
+  order different payloads at the same instant; stop and roll back instead of guessing.
+- Query boundaries belong to the durable cursor. A configurable overlap without a
+  persisted boundary can change a resumed query and silently skip data.
+- Test fixtures that terminate database backends must identify their own connections;
+  broad pg_stat_activity queries can interfere with parallel suites.
+- Next source acceptance needs a sandbox. Existing ConnectorKit v0.7.0 listing does
+  not expose modified-since; release access and query design must be resolved first.

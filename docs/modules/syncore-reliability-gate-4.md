@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 4: incremental query boundaries
 
-Status: IMPLEMENTED AND VERIFIED; final-head CI and security review required before merge. Gate 3 merged in PR #3 after 35 real-database CI tests.
+Status: MERGED in [PR #4](https://github.com/itzzzzzzak/control-plane/pull/4), commit `31fcbd6974d13659d6a36a5a74932f5ad1d8528d`. [Final CI](https://github.com/itzzzzzzak/control-plane/actions/runs/39028017716) passed 39 tests, zero skipped, Node 22/24 + PostgreSQL 17; author-side adversarial review recorded. Gate 3 merged in PR #3 after 35 real-database CI tests.
 
 ## Contract
 
