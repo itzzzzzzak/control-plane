@@ -174,12 +174,12 @@ export async function replayDeadLetters(options: Pick<RunOptions, "name" | "stor
   const { name, store } = options
   const validate = options.validate ?? validateRecord
   const now = options.now ?? (() => new Date())
-  const letters = await store.listDeadLetters(name)
-  const fixed: number[] = []
-  const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
   const lease = await store.acquire(name, 30_000)
   if (!lease) throw new Error("sync busy")
   try {
+  const letters = await store.listDeadLetters(name)
+  const fixed: number[] = []
+  const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
   await store.transaction(name, lease, (tx) => {
     letters.forEach((letter, i) => {
       try {
