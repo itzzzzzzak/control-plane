@@ -6,8 +6,7 @@ import { memoryStore, postgresStore, runSync, type RunOptions, type SyncStore } 
 const url = process.env.SYNCORE_TEST_DATABASE_URL
 const at = (n: number) => new Date(Date.UTC(2026, 9, 17, 0, 0, n)).toISOString()
 const rec = (id: string, n: number) => ({ id, modifiedAt: at(n), data: { id } })
-// Deliberately dynamic options allow an executable RED contract before RunOptions evolves.
-const run = (options: RunOptions, lookbackMs: number) => runSync({ ...options, lookbackMs } as RunOptions)
+const run = (options: RunOptions, lookbackMs: number) => runSync({ ...options, lookbackMs })
 
 for (const backend of ['memory', 'postgres'] as const) {
   test(`Gate 4 ${backend}: late arrivals and immutable resumed query`, { skip: backend === 'postgres' && !url, timeout: 15000 }, async t => {
@@ -74,4 +73,26 @@ test('Gate 4 invalid lookback is rejected before any ownership or source calls',
     await assert.rejects(run({ name: 'invalid', store, source: { async fetchPage() { throw new Error('source must not run') } } }, lookback), /lookback/)
   }
   assert.equal(acquisitions, 0)
+})
+
+test('Gate 4 migration preserves populated legacy checkpoints and is idempotent', { skip: !url, timeout: 10000 }, async t => {
+  const { readFile } = await import('node:fs/promises')
+  const pool = new Pool({ connectionString: url })
+  const client = await pool.connect()
+  t.after(async () => { await client.query('ROLLBACK'); client.release(); await pool.end() })
+  const schema = 'migration_' + randomUUID().replaceAll('-', '')
+  await client.query('BEGIN')
+  await client.query(`CREATE SCHEMA "${schema}"`)
+  await client.query(`SET LOCAL search_path TO "${schema}"`)
+  await client.query('CREATE TABLE syncore_state(sync_name text PRIMARY KEY,cursor text,max_seen text,watermark text,updated_at timestamptz DEFAULT clock_timestamp())')
+  await client.query('INSERT INTO syncore_state(sync_name,cursor,max_seen,watermark) VALUES($1,$2,$3,$4)', ['legacy', 'opaque-cursor', at(110), at(100)])
+  const migration = await readFile('modules/syncore/migrations/003_query_bounds.sql', 'utf8')
+  await client.query(migration)
+  await client.query(migration)
+  const row = (await client.query('SELECT * FROM syncore_state')).rows[0]
+  assert.equal(row.cursor, 'opaque-cursor')
+  assert.equal(row.watermark, at(100))
+  assert.equal(row.max_seen, at(110))
+  assert.equal(row.query_since_set, false)
+  assert.equal(row.run_since, null)
 })

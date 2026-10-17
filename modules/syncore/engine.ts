@@ -36,6 +36,8 @@ export interface RunOptions {
   retry?: Partial<RetryOptions>
   now?: () => Date
   leaseTtlMs?: number
+  /** Inclusive late-arrival overlap for NEW incremental runs; default 60s, maximum 24h. */
+  lookbackMs?: number
 }
 
 const defaultRetry: RetryOptions = { maxAttempts: 4, baseDelayMs: 500, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) }
@@ -110,16 +112,22 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
   const now = options.now ?? (() => new Date())
   const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
 
+  const lookback = options.lookbackMs ?? 60_000
+  if (!Number.isSafeInteger(lookback) || lookback < 0 || lookback > 86_400_000) throw new RangeError('invalid lookback')
   const ttl = options.leaseTtlMs ?? 30_000
   const lease = await store.acquire(name, ttl)
   if (!lease) return { status: "busy", stats }
   const heartbeat = startHeartbeat(store, lease, ttl)
   try {
     const state = await store.getState(name)
-    const since = state.watermark
+    const watermark = state.watermark
+    // Legacy unfinished runs retain their old watermark query, without a new overlap.
+    const since = state.cursor !== null
+      ? (state.runSince === undefined ? watermark : state.runSince)
+      : watermark === null ? null : lookback === 0 ? watermark : new Date(Date.parse(watermark) - lookback).toISOString()
     let cursor = state.cursor
     let maxSeen = state.maxSeen
-    if (since !== null && newer(since, maxSeen)) maxSeen = since
+    if (watermark !== null && newer(watermark, maxSeen)) maxSeen = watermark
 
     for (;;) {
       heartbeat.signal.throwIfAborted()
@@ -150,7 +158,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
           for (const letter of bad) await tx.addDeadLetter(letter)
           const last = page.nextCursor === null
           // The checkpoint is saved in the same transaction as the records: both happen, or neither does.
-          await tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? since } : { cursor: page.nextCursor, maxSeen, watermark: since })
+          await tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? watermark } : { cursor: page.nextCursor, maxSeen, watermark, runSince: since })
         })
       } catch (error) {
         if (error instanceof LeaseLostError) return { status: "lease-lost", stats }

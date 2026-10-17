@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 3: record revision correctness
 
-Status: IMPLEMENTED; final-head CI and review required before merge. Gate 2 merged in PR #2 at `6ca2471` after real PostgreSQL
+Status: MERGED in [PR #3](https://github.com/itzzzzzzak/control-plane/pull/3), commit `f4b4f0e5e58a298fb2956397753f2009de1f562f`. [Final CI](https://github.com/itzzzzzzak/control-plane/actions/runs/39027546002) passed 35 tests, zero skipped, Node 22/24 + PostgreSQL 17; author-side adversarial review recorded. Gate 2 merged in PR #2 at `6ca2471` after real PostgreSQL
 verification. This milestone changes record ordering semantics, not lease storage.
 
 ## Problems
