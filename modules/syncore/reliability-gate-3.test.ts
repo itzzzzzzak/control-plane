@@ -66,3 +66,19 @@ for (const backend of ['memory', 'postgres'] as const) {
     assert.equal((await store.getRow(name, 'edited'))?.baseHash, hashData({ value: 'new-source' }))
   })
 }
+
+test('Gate 3 ambiguity within a first page rolls back; corrected retry and tied delete converge', async () => {
+  const store = memoryStore()
+  const name = randomUUID()
+  const failed = await deliver(store, name, [rec('x', 1, 'one'), rec('x', 1, 'two')])
+  assert.equal(failed.status, 'stopped')
+  assert.equal(await store.getRow(name, 'x'), undefined)
+  assert.equal((await store.getState(name)).watermark, null)
+  assert.equal((await deliver(store, name, [rec('x', 1, 'one'), rec('x', 2, 'two')])).status, 'completed')
+  assert.equal((await store.getRow(name, 'x'))?.data.value, 'two')
+  for (const records of [[rec('tied', 5), gone('tied', 5)], [gone('tied', 5), rec('tied', 5)]]) {
+    const sync = randomUUID()
+    assert.equal((await deliver(store, sync, records)).status, 'completed')
+    assert.equal((await store.getRow(sync, 'tied'))?.deleted, true)
+  }
+})

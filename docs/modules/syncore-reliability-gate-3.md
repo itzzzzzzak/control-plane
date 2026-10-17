@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 3: record revision correctness
 
-Status: RED CONTRACT. Gate 2 merged in PR #2 at `6ca2471` after real PostgreSQL
+Status: IMPLEMENTED; final-head CI and review required before merge. Gate 2 merged in PR #2 at `6ca2471` after real PostgreSQL
 verification. This milestone changes record ordering semantics, not lease storage.
 
 ## Problems
@@ -45,3 +45,20 @@ A timestamp-only source cannot totally order same-timestamp modifications. Faili
 closed preserves data, but needs operator attention. This does not solve late arrivals
 older than the incremental watermark, source snapshots, direct local SQL races or
 field-level conflict merging. Those remain explicit subsequent work.
+
+## Evidence and review
+
+- RED: [CI 39027349577](https://github.com/itzzzzzzak/control-plane/actions/runs/39027349577)
+  failed against both memory and PostgreSQL at the missing unknown tombstone assertion.
+- The monotonic-watermark regression was separately reproduced locally before its fix.
+- Implementation `2db211aaa8cba74146057b8c375954c28ad4ce51` passed
+  [CI 39027441744](https://github.com/itzzzzzzak/control-plane/actions/runs/39027441744)
+  on Node 22 and 24 with real PostgreSQL 17. The final head additionally checks
+  same-page ambiguity rollback, corrected retry and both tied-delete arrival orders.
+- Review: no new network surface, dependencies, SQL writes or credential handling.
+  Ambiguity fails closed and preserves checkpoint/audit state. Existing source-wins
+  conflict behavior still applies to strictly newer source content changes.
+- Isolated the existing backend-termination test by unique database application name,
+  so parallel test files cannot select or terminate an unrelated test connection.
+- Late arrivals below the watermark are still outside this gate; do not claim a
+  complete production source consistency guarantee until query-boundary work passes.

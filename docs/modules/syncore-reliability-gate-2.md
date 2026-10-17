@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 2 — PostgreSQL durability RFC
 
-Status: IMPLEMENTED AND VERIFIED. Merge remains conditional on final-head CI and security review. See [operations](syncore-postgres-operations.md) for setup and recovery. The original design and verification matrix follow; completion evidence is recorded below.
+Status: MERGED in [PR #2](https://github.com/itzzzzzzak/control-plane/pull/2), commit `6ca2471de71b17d54c1e65d3d8a2e7505c3d9a27`. Final-head CI and the adversarial review passed before merge. See [operations](syncore-postgres-operations.md) for setup and recovery. The original design and verification matrix follow; completion evidence is recorded below.
 
 ## Existing Gate 1 review (base 1eeb295)
 

@@ -1,6 +1,6 @@
 # SyncCore: design
 
-Status: **decided for v1**. Engine and in-memory store first; Postgres store and the Zoho source (via ConnectorKit) next.
+Status: engine and PostgreSQL durability are implemented. See [engineering progress](../engineering-progress.md). Live Zoho source integration remains subsequent work.
 
 ## Problem
 Calling an API is simple. Keeping two systems consistent over time, through crashes, rate limits, duplicate events and concurrent edits, is not.
@@ -26,14 +26,15 @@ Bidirectional sync, more than one source type, a UI.
 
 **One page = one transaction.** Applying a page's records and saving the checkpoint (the next cursor) happen together or not at all. A crash can therefore never leave "records applied, checkpoint not saved" (which would re-apply them) or the reverse (which would skip them). That is the whole resume guarantee.
 
-**Idempotent apply.** Each row remembers the source's `modifiedAt` and a hash of the data last synced. A record older than the row is skipped; an equal one with the same data is "unchanged". Re-delivering a page or a duplicate event changes nothing.
+**Idempotent apply.** Each row remembers the source's `modifiedAt` and a hash of the data last synced. A record older than the row is skipped; an equal source baseline is skipped even if the row was locally edited. Newer metadata with unchanged source content preserves local edits. Different live payloads at the same instant stop and roll back the page: a timestamp-only source cannot order them. See [Gate 3](syncore-reliability-gate-3.md).
 
-**Full, then incremental.** The first run walks every page. When the last page is done, the highest `modifiedAt` seen becomes the **watermark**; the next run asks the source only for changes since then. The watermark moves only when a run completes, so a resumed run uses the same `since` as the one it continues.
+**Full, then incremental.** The first run walks every page. When the last page is done, the greater of the previous watermark and the highest `modifiedAt` seen becomes the **watermark**; the next run asks the source only for changes since then. The watermark moves only when a run completes, so a resumed run uses the same `since` as the one it continues.
 
-**Conflicts (Zoho wins).** If the database row's data no longer matches the hash of what was last synced, someone edited it locally. Zoho's value still overwrites it, and the overwritten value is written to the conflict log first.
+**Conflicts (Zoho wins).** If the database row's data no longer matches the hash of what was last synced, someone edited it locally. If the source also changed from its baseline, Zoho's value overwrites it, and the overwritten value is written to the conflict log first.
 
 **Bad records.** A record that fails validation goes to the dead-letter list with the reason and the sync continues. `replayDeadLetters` retries them (after a fix or a schema change).
 
-**Deletes.** A record deleted at the source becomes a tombstone (`deleted: true`) in the database, not a physical delete, so it can be audited.
+**Deletes.** A record deleted at the source becomes a tombstone (`deleted: true`), including unseen IDs. Repeated deletes advance its timestamp; only a strictly newer live revision can resurrect it. A delete wins a timestamp tie. Known row data remains available for audit.
 
 **Source failures.** Retryable errors (rate limit, 5xx) are retried with backoff, honoring `retryAfter`. Anything else stops the run **with the checkpoint intact**; `runSync` returns `status: "stopped"` instead of throwing, because stopping partway is an expected outcome.
+
