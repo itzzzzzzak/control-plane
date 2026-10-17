@@ -2,14 +2,14 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { Pool } from 'pg'
+import { postgresStore } from './postgres-store.js'
+import { once } from 'node:events'
 import { runSync, replayDeadLetters, hashData } from './index.js'
 const url = process.env.SYNCORE_TEST_DATABASE_URL
-const adapterPath = './' + 'postgres-store.js'
 const at = '2026-10-17T00:00:00.000Z'
 const row = (id: string) => ({ id, data: { name: id }, baseHash: hashData({ name: id }), sourceModifiedAt: at, deleted: false })
 
 test('Gate 2 real PostgreSQL durability, fencing and rollback', { skip: !url, timeout: 20000 }, async (t) => {
-  const { postgresStore } = await import(adapterPath)
   const pool = new Pool({ connectionString: url, max: 4 })
   const other = new Pool({ connectionString: url, max: 4 })
   t.after(async () => { await pool.end(); await other.end() })
@@ -19,7 +19,7 @@ test('Gate 2 real PostgreSQL durability, fencing and rollback', { skip: !url, ti
   const claims = await Promise.all([store.acquire(name, 10000), second.acquire(name, 10000)])
   assert.equal(claims.filter(Boolean).length, 1)
   const lease = claims.find(Boolean)!
-  await assert.rejects(store.transaction(name, lease, async (tx: any) => {
+  await assert.rejects(store.transaction(name, lease, async (tx) => {
     await tx.putRow(row('rolled-back'))
     await tx.setState({ cursor: 'bad', maxSeen: at, watermark: null })
     await tx.addDeadLetter({ raw: null, reason: 'bad', at })
@@ -28,7 +28,7 @@ test('Gate 2 real PostgreSQL durability, fencing and rollback', { skip: !url, ti
   assert.equal(await store.getRow(name, 'rolled-back'), undefined)
   assert.equal((await store.getState(name)).cursor, null)
   assert.equal((await store.listDeadLetters(name)).length, 0)
-  await store.transaction(name, lease, async (tx: any) => {
+  await store.transaction(name, lease, async (tx) => {
     await tx.putRow(row("id'; DROP TABLE syncore_rows; --"))
     await tx.setState({ cursor: 'page-2', maxSeen: at, watermark: null })
   })
@@ -40,14 +40,14 @@ test('Gate 2 real PostgreSQL durability, fencing and rollback', { skip: !url, ti
   assert.equal(await second.renew(lease, 10000), null)
   const replacement = (await second.acquire(name, 10000))!
   assert.ok(replacement.epoch > lease.epoch)
-  await assert.rejects(store.transaction(name, lease, async (tx: any) => tx.putRow(row('stale'))), /lease/)
+  await assert.rejects(store.transaction(name, lease, async (tx) => tx.putRow(row('stale'))), /lease/)
   assert.equal(await store.release(lease), false)
   assert.ok(await second.renew(replacement, 10000))
   await second.release(replacement)
 
   // A transaction which outlives its lease must rollback even without a takeover.
   const short = (await store.acquire(name, 50))!
-  await assert.rejects(store.transaction(name, short, async (tx: any) => {
+  await assert.rejects(store.transaction(name, short, async (tx) => {
     await tx.putRow(row('too-late'))
     await pool.query('SELECT pg_sleep(0.1)')
   }), /lease/)
@@ -55,7 +55,6 @@ test('Gate 2 real PostgreSQL durability, fencing and rollback', { skip: !url, ti
 })
 
 test('Gate 2 restart resumes saved checkpoint; replay resolution is atomic', { skip: !url, timeout: 20000 }, async (t) => {
-  const { postgresStore } = await import(adapterPath)
   let pool = new Pool({ connectionString: url })
   t.after(async () => pool.end())
   let store = postgresStore(pool)
@@ -76,7 +75,7 @@ test('Gate 2 restart resumes saved checkpoint; replay resolution is atomic', { s
   const letter = (await store.listDeadLetters(name))[0]!
   assert.ok(letter.id)
   const lease = (await store.acquire(name, 10000))!
-  await assert.rejects(store.transaction(name, lease, async (tx: any) => {
+  await assert.rejects(store.transaction(name, lease, async (tx) => {
     await tx.putRow(row('replay'))
     await tx.resolveDeadLetter(letter.id)
     throw new Error('replay fault')
@@ -90,3 +89,53 @@ test('Gate 2 restart resumes saved checkpoint; replay resolution is atomic', { s
 })
 
 test('Gate 2: CI must provision PostgreSQL', { skip: !process.env.CI }, () => assert.ok(url))
+
+async function worker(mode: string, name: string, t: import('node:test').TestContext) {
+  const { fork } = await import('node:child_process')
+  const child = fork(new URL('./postgres-worker.js', import.meta.url), [mode, name], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  let stderr = ''
+  child.stderr!.on('data', data => { stderr += data })
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL') })
+  const message = new Promise<any>((resolve, reject) => {
+    child.once('message', resolve)
+    child.once('error', reject)
+    child.once('exit', code => reject(new Error(`worker exited ${code}: ${stderr}`)))
+  })
+  const exited = once(child, 'exit')
+  return { child, message, exited }
+}
+
+test('Gate 2 independent processes compete for one durable lease', { skip: !url, timeout: 15000 }, async t => {
+  const name = randomUUID()
+  const a = await worker('claim', name, t)
+  const b = await worker('claim', name, t)
+  const results = await Promise.all([a.message, b.message])
+  assert.equal(results.filter(r => r.acquired).length, 1)
+  await Promise.all([a.exited, b.exited])
+})
+
+test('Gate 2 SIGKILL rolls back a page; commit-response loss resumes durable checkpoint', { skip: !url, timeout: 20000 }, async t => {
+  const pool = new Pool({ connectionString: url })
+  t.after(async () => pool.end())
+  const store = postgresStore(pool)
+  for (const mode of ['crash', 'commit-response-lost']) {
+    const name = randomUUID()
+    const child = await worker(mode, name, t)
+    await child.message
+    child.child.kill('SIGKILL')
+    await child.exited
+    // Waiting for backend rollback/lock release is synchronized by this UPDATE.
+    await pool.query("UPDATE syncore_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE sync_name=$1", [name])
+    assert.equal(await store.getRow(name, 'uncommitted'), undefined)
+    assert.equal((await store.listDeadLetters(name)).length, 0)
+    const state = await store.getState(name)
+    assert.equal(state.cursor, mode === 'crash' ? null : 'next')
+    const result = await runSync({ name, store, source: { async fetchPage(args) {
+      assert.equal(args.cursor, state.cursor)
+      return { records: [{ id: 'committed', modifiedAt: at, data: {} }], nextCursor: null }
+    } } })
+    assert.equal(result.status, 'completed')
+    assert.equal(result.stats.created, mode === 'crash' ? 1 : 0)
+    assert.equal((await store.listConflicts(name)).length, 0)
+  }
+})

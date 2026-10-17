@@ -35,6 +35,9 @@ RETURNS timestamptz LANGUAGE plpgsql AS $$
 DECLARE new_expiry timestamptz;
 BEGIN
   IF p_ttl_ms < 1 OR p_ttl_ms > 86400000 THEN RAISE EXCEPTION 'invalid TTL'; END IF;
+  -- Lock first, then evaluate wall clock: a blocked UPDATE predicate can have
+  -- been evaluated before the lock wait and otherwise resurrect an expired lease.
+  PERFORM 1 FROM syncore_leases WHERE sync_name = p_sync FOR UPDATE;
   UPDATE syncore_leases
     SET expires_at = clock_timestamp() + p_ttl_ms * interval '1 millisecond'
     WHERE sync_name = p_sync AND token = p_token AND epoch = p_epoch
@@ -50,6 +53,7 @@ CREATE OR REPLACE FUNCTION syncore_release_lease(
 RETURNS boolean LANGUAGE plpgsql AS $$
 DECLARE affected integer;
 BEGIN
+  PERFORM 1 FROM syncore_leases WHERE sync_name = p_sync FOR UPDATE;
   UPDATE syncore_leases SET token = NULL, expires_at = NULL
   WHERE sync_name = p_sync AND token = p_token AND epoch = p_epoch
     AND expires_at > clock_timestamp();
@@ -65,12 +69,13 @@ CREATE OR REPLACE FUNCTION syncore_assert_lease(
   p_sync text, p_token uuid, p_epoch bigint
 )
 RETURNS void LANGUAGE plpgsql AS $$
-DECLARE held boolean;
+DECLARE current_lease syncore_leases%ROWTYPE;
 BEGIN
-  SELECT (token = p_token AND epoch = p_epoch AND expires_at > clock_timestamp())
-    INTO held FROM syncore_leases WHERE sync_name = p_sync FOR UPDATE;
-  IF held IS DISTINCT FROM true THEN
+  SELECT * INTO current_lease FROM syncore_leases WHERE sync_name = p_sync FOR UPDATE;
+  IF (current_lease.token = p_token AND current_lease.epoch = p_epoch
+      AND current_lease.expires_at > clock_timestamp()) IS DISTINCT FROM true THEN
     RAISE EXCEPTION 'sync lease lost or fenced' USING ERRCODE = '55000';
   END IF;
 END;
 $$;
+

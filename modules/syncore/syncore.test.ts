@@ -60,9 +60,9 @@ test("the store's transaction is all-or-nothing: a failure inside it keeps nothi
   const store = memoryStore()
   const lease = (await store.acquire("zoho", 30000))!
   await assert.rejects(() =>
-    store.transaction("zoho", lease, (tx) => {
-      tx.putRow({ id: "x", data: {}, baseHash: "h", sourceModifiedAt: T(1), deleted: false })
-      tx.setState({ cursor: "100", maxSeen: T(1), watermark: null })
+    store.transaction("zoho", lease, async (tx) => {
+      await tx.putRow({ id: "x", data: {}, baseHash: "h", sourceModifiedAt: T(1), deleted: false })
+      await tx.setState({ cursor: "100", maxSeen: T(1), watermark: null })
       throw new Error("crash mid-page")
     }),
   )
@@ -171,3 +171,4 @@ test("a non-retryable source error stops immediately (no retries) and never thro
   assert.equal(result.status, "stopped")
   assert.equal(src.calls.length, 1)
 })
+

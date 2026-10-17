@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto"
-import { LeaseLostError, type Conflict, type DeadLetter, type Row, type SyncLease, type SyncState, type SyncStore, type SyncTx } from "./types.js"
+import { LeaseLostError, type Conflict, type StoredDeadLetter, type Row, type SyncLease, type SyncState, type SyncStore, type SyncTx } from "./types.js"
 
 interface Data {
   rows: Map<string, Row>
   conflicts: Conflict[]
-  deadLetters: DeadLetter[]
+  deadLetters: StoredDeadLetter[]
   state: SyncState
   epoch: bigint
   lease: SyncLease | null
@@ -75,11 +75,12 @@ export function memoryStore(clock: () => number = Date.now): SyncStore & {
         state: { ...live.state }, epoch: live.epoch, lease: live.lease,
       }
       const tx: SyncTx = {
-        getRow: (id) => work.rows.get(id),
-        putRow: (row) => void work.rows.set(row.id, structuredClone(row)),
-        addConflict: (c) => void work.conflicts.push(structuredClone(c)),
-        addDeadLetter: (l) => void work.deadLetters.push(structuredClone(l)),
-        setState: (s) => void (work.state = { ...s }),
+        getRow: async (id) => work.rows.get(id),
+        putRow: async (row) => void work.rows.set(row.id, structuredClone(row)),
+        addConflict: async (c) => void work.conflicts.push(structuredClone(c)),
+        addDeadLetter: async (l) => void work.deadLetters.push({ ...structuredClone(l), id: randomUUID() }),
+        resolveDeadLetter: async (id) => { work.deadLetters = work.deadLetters.filter(l => l.id !== id) },
+        setState: async (s) => void (work.state = { ...s }),
       }
       const result = await fn(tx)
       check(lease) // verify *after* async work and before commit, while serialized
@@ -92,13 +93,6 @@ export function memoryStore(clock: () => number = Date.now): SyncStore & {
     async getRow(sync, id) { const r = of(sync).rows.get(id); return r && structuredClone(r) },
     async listConflicts(sync) { return structuredClone(of(sync).conflicts) },
     async listDeadLetters(sync) { return structuredClone(of(sync).deadLetters) },
-    removeDeadLetters: (sync, lease, indexes) => exclusive(sync, async () => {
-      if (lease.sync !== sync) throw new LeaseLostError()
-      check(lease)
-      const d = of(sync)
-      const drop = new Set(indexes)
-      d.deadLetters = d.deadLetters.filter((_, i) => !drop.has(i))
-    }),
     localEdit(sync, id, data) {
       const row = of(sync).rows.get(id)
       if (!row) throw new Error(`no row ${id}`)
@@ -106,3 +100,4 @@ export function memoryStore(clock: () => number = Date.now): SyncStore & {
     },
   }
 }
+
