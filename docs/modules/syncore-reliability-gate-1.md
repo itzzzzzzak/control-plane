@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 1: per-sync coordination and fencing
 
-Status: PROPOSED CONTRACT / RED TESTS ONLY. No production implementation in this branch yet.
+Status: IN-MEMORY IMPLEMENTATION COMPLETE; PostgreSQL implementation remains a separate milestone.
 
 ## Invariants
 
@@ -14,7 +14,7 @@ Status: PROPOSED CONTRACT / RED TESTS ONLY. No production implementation in this
 8. The checkpoint + all writes for a page remain atomic; an owner cannot commit after its lease expires, even if the page was fetched before expiry.
 9. Replay operations must eventually honor the same ownership/fencing rule, rather than bypass the coordinator.
 
-## Proposed API sketch (not implemented)
+## Implemented interface (memory store)
 
 ```ts
 interface SyncLease {
@@ -49,9 +49,9 @@ Use a `syncore_leases` row per sync name (primary key `sync_name`), with `epoch 
 - **Finite TTL + renew over indefinite owner lock:** crash recovery works, but long fetches need heartbeat and a failed heartbeat must stop writes.
 - **Row-lock check on commit over trust in caller:** stronger consistency at cost of short database lock sections.
 
-## RED tests for the current prototype
+## Regression tests
 
-`modules/syncore/reliability-gate-1.test.ts` first reproduces overlapping `runSync` calls and concurrent in-memory transaction lost updates. They MUST fail against current code. These tests are diagnostic and are not yet a complete lease/fencing acceptance suite: future tests must cover expiry, renewal, stale owner commits, stale owner release, crash/restart, per-sync independence and replay interactions.
+`modules/syncore/reliability-gate-1.test.ts` first reproduced overlapping `runSync` calls and concurrent in-memory transaction lost updates. They now pass with the Gate 1 in-memory implementation. The suite additionally tests expiry, stale ownership, serialization and per-sync independence. PostgreSQL crash/restart tests, renewal under long-running fetch, and cross-process lease contention remain for the durable store milestone.
 
 ## Later decisions required
 
@@ -59,3 +59,7 @@ Use a `syncore_leases` row per sync name (primary key `sync_name`), with `epoch 
 - Lock TTL/renewal interval and clock assumptions for production.
 - Isolation guarantees for direct store access and local target edits outside SyncCore.
 - Robust incremental watermarks and same-timestamp revisions: independent reliability work, not part of Gate 1.
+
+## Scope and current limits
+
+The in-memory lease is not durable and does not coordinate across Node processes. A long source fetch can outlive the lease; commit-time fencing refuses the stale commit rather than extending the lease in the background. The PostgreSQL implementation must add a bounded renewal heartbeat and test multi-process behavior. Dead-letter replay acquires the lease before reading the worklist, but the pre-existing separation between replay writes and removal from the dead-letter queue is not crash-atomic; resolve it in the durability milestone.
