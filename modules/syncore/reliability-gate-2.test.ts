@@ -196,14 +196,15 @@ test('Gate 2 real heartbeat retains a slow fetch; distinct syncs and payload lim
 })
 
 test('Gate 2 backend termination rolls back and pool continues; checkout is bounded', { skip: !url, timeout: 10000 }, async t => {
-  const pool = new Pool({ connectionString: url, max: 2 })
+  const applicationName = 'gate2-termination-' + randomUUID()
+  const pool = new Pool({ connectionString: url, max: 2, application_name: applicationName })
   t.after(async () => pool.end())
   const store = postgresStore(pool)
   const name = randomUUID()
   const lease = (await store.acquire(name, 10000))!
   await assert.rejects(store.transaction(name, lease, async tx => {
     await tx.putRow(row('killed'))
-    const active = (await pool.query("SELECT pid FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND state='idle in transaction' AND query LIKE 'INSERT INTO syncore_rows%'" )).rows
+    const active = (await pool.query("SELECT pid FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND state='idle in transaction' AND query LIKE 'INSERT INTO syncore_rows%' AND application_name=$1", [applicationName])).rows
     assert.equal(active.length, 1)
     await pool.query('SELECT pg_terminate_backend($1)', [active[0].pid])
   }))

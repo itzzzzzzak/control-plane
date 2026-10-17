@@ -86,6 +86,14 @@ export interface SyncLease {
   expiresAt: Date
 }
 
+/** Timestamp-only sources cannot order differing payloads at the same instant. */
+export class AmbiguousRevisionError extends Error {
+  constructor(readonly recordId: string) {
+    super('ambiguous source revision: different payloads share the same timestamp')
+    this.name = 'AmbiguousRevisionError'
+  }
+}
+
 export class LeaseLostError extends Error {
   constructor() { super("sync lease expired or ownership was fenced"); this.name = "LeaseLostError" }
 }
