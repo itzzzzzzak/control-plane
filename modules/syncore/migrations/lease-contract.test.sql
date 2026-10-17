@@ -36,6 +36,22 @@ BEGIN
   IF syncore_renew_lease('gate2-sql-test', first_token, first_epoch, 10000) IS NOT NULL THEN
     RAISE EXCEPTION 'stale owner renewed';
   END IF;
+  -- Force a lease expiry using the database clock; no timing-dependent sleeps.
+  UPDATE syncore_leases SET expires_at = clock_timestamp() - interval '1 second'
+    WHERE sync_name = 'gate2-sql-test';
+  IF syncore_renew_lease('gate2-sql-test', other_token, next_epoch, 10000) IS NOT NULL THEN
+    RAISE EXCEPTION 'expired lease renewed';
+  END IF;
+  -- Check a stale owner cannot pass commit fencing, without aborting the outer test.
+  BEGIN
+    PERFORM syncore_assert_lease('gate2-sql-test', other_token, next_epoch);
+    RAISE EXCEPTION 'expired owner bypassed fence';
+  EXCEPTION WHEN SQLSTATE '55000' THEN
+    NULL; -- expected fenced-owner exception
+  END;
+  SELECT token, epoch INTO other_token, next_epoch
+    FROM syncore_claim_lease('gate2-sql-test', 10000);
+  IF next_epoch <> 3 THEN RAISE EXCEPTION 'expiry takeover did not advance epoch'; END IF;
 END;
 $$;
 ROLLBACK;
