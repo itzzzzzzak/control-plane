@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { SourceError, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
+import { LeaseLostError, SourceError, type SyncLease, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
 
 export interface SyncStats {
   pages: number
@@ -14,7 +14,7 @@ export interface SyncStats {
 }
 
 export interface SyncResult {
-  status: "completed" | "stopped"
+  status: "completed" | "stopped" | "busy" | "lease-lost"
   stats: SyncStats
   /** Why the run stopped. The checkpoint is intact: run again to resume. */
   error?: string
@@ -34,6 +34,7 @@ export interface RunOptions {
   validate?: (raw: unknown) => SourceRecord
   retry?: Partial<RetryOptions>
   now?: () => Date
+  leaseTtlMs?: number
 }
 
 const defaultRetry: RetryOptions = { maxAttempts: 4, baseDelayMs: 500, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) }
@@ -104,12 +105,19 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
   const now = options.now ?? (() => new Date())
   const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
 
+  const ttl = options.leaseTtlMs ?? 30_000
+  let lease = await store.acquire(name, ttl)
+  if (!lease) return { status: "busy", stats }
+  try {
   const state = await store.getState(name)
   const since = state.watermark
   let cursor = state.cursor
   let maxSeen = state.maxSeen
 
   for (;;) {
+    const renewed = await store.renew(lease, ttl)
+    if (!renewed) return { status: "lease-lost", stats }
+    lease = renewed
     let page
     try {
       page = await fetchWithRetry(source, { cursor, since }, retry)
@@ -130,7 +138,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
 
     const pageStats: SyncStats = { ...stats, pages: 0 }
     try {
-      await store.transaction(name, (tx) => {
+      await store.transaction(name, lease, (tx) => {
         for (const r of valid) applyRecord(tx, r, pageStats, now().toISOString())
         for (const letter of bad) tx.addDeadLetter(letter)
         const last = page.nextCursor === null
@@ -138,6 +146,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
         tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? since } : { cursor: page.nextCursor, maxSeen, watermark: since })
       })
     } catch (error) {
+      if (error instanceof LeaseLostError) return { status: "lease-lost", stats }
       return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
     }
     Object.assign(stats, pageStats, { pages: stats.pages + 1, deadLettered: stats.deadLettered + bad.length })
@@ -145,6 +154,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     if (page.nextCursor === null) return { status: "completed", stats }
     cursor = page.nextCursor
   }
+  } finally { await store.release(lease) }
 }
 
 async function fetchWithRetry(source: Source, args: { cursor: string | null; since: string | null }, retry: RetryOptions) {
@@ -164,10 +174,13 @@ export async function replayDeadLetters(options: Pick<RunOptions, "name" | "stor
   const { name, store } = options
   const validate = options.validate ?? validateRecord
   const now = options.now ?? (() => new Date())
+  const lease = await store.acquire(name, 30_000)
+  if (!lease) throw new Error("sync busy")
+  try {
   const letters = await store.listDeadLetters(name)
   const fixed: number[] = []
   const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
-  await store.transaction(name, (tx) => {
+  await store.transaction(name, lease, (tx) => {
     letters.forEach((letter, i) => {
       try {
         applyRecord(tx, validate(letter.raw), stats, now().toISOString())
@@ -177,6 +190,7 @@ export async function replayDeadLetters(options: Pick<RunOptions, "name" | "stor
       }
     })
   })
-  await store.removeDeadLetters(name, fixed)
+  await store.removeDeadLetters(name, lease, fixed)
   return { replayed: fixed.length, remaining: letters.length - fixed.length }
+  } finally { await store.release(lease) }
 }
