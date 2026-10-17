@@ -9,12 +9,13 @@
 
 | SyncCore Gate 3: revision correctness | [#3](https://github.com/itzzzzzzak/control-plane/pull/3) | Merged `f4b4f0e`; [CI](https://github.com/itzzzzzzak/control-plane/actions/runs/39027546002), 35 tests, zero skips, Node 22/24 + PostgreSQL 17; security review recorded |
 
+| SyncCore Gate 4: query boundaries | [#4](https://github.com/itzzzzzzak/control-plane/pull/4) | Merged `31fcbd69`; [CI](https://github.com/itzzzzzzak/control-plane/actions/runs/39028017716), 39 tests, zero skips, Node 22/24 + PostgreSQL 17; security review recorded |
+
 ## Current
 
-SyncCore Gate 4: bounded late arrivals and persistent incremental query boundaries.
-Pinned cursor queries, compatible legacy migration and restart after configuration changes.
-
-Latest Gate 4 implementation evidence: [CI 39027835752](https://github.com/itzzzzzzak/control-plane/actions/runs/39027835752), 39 tests, zero skips, Node 22/24 + PostgreSQL 17. Final-head CI and review remain the merge gate.
+Next SyncCore milestone: source adapter integration through the published ConnectorKit
+release, followed by a dedicated sandbox live-acceptance run. No source adapter or
+live provider certification has been completed. Prerequisites below are unresolved.
 
 ## Subsequent order
 
