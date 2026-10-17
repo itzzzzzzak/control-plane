@@ -1,6 +1,6 @@
 import { startHeartbeat, abortable } from "./heartbeat.js"
 import { createHash } from "node:crypto"
-import { LeaseLostError, SourceError, type SyncLease, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
+import { LeaseLostError, SourceError, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
 
 export interface SyncStats {
   pages: number
@@ -111,55 +111,55 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
   if (!lease) return { status: "busy", stats }
   const heartbeat = startHeartbeat(store, lease, ttl)
   try {
-  const state = await store.getState(name)
-  const since = state.watermark
-  let cursor = state.cursor
-  let maxSeen = state.maxSeen
+    const state = await store.getState(name)
+    const since = state.watermark
+    let cursor = state.cursor
+    let maxSeen = state.maxSeen
 
-  for (;;) {
-    heartbeat.signal.throwIfAborted()
-    let page
-    try {
-      page = await abortable(fetchWithRetry(source, { cursor, since, signal: heartbeat.signal }, retry), heartbeat.signal)
-    } catch (error) {
-      if (heartbeat.signal.aborted) return { status: "lease-lost", stats }
-      return { status: "stopped", stats, error: error instanceof Error ? error.message : "unknown error" }
-    }
-
-    const valid: SourceRecord[] = []
-    const bad: DeadLetter[] = []
-    for (const raw of page.records) {
+    for (;;) {
+      heartbeat.signal.throwIfAborted()
+      let page
       try {
-        valid.push(validate(raw))
+        page = await abortable(fetchWithRetry(source, { cursor, since, signal: heartbeat.signal }, retry), heartbeat.signal)
       } catch (error) {
-        bad.push({ raw, reason: error instanceof Error ? error.message : "invalid record", at: now().toISOString() })
+        if (heartbeat.signal.aborted) return { status: "lease-lost", stats }
+        return { status: "stopped", stats, error: error instanceof Error ? error.message : "unknown error" }
       }
-    }
-    for (const r of valid) if (newer(r.modifiedAt, maxSeen)) maxSeen = r.modifiedAt
 
-    const pageStats: SyncStats = { ...stats, pages: 0 }
-    try {
-      await store.transaction(name, lease, async (tx) => {
-        heartbeat.signal.throwIfAborted()
-        for (const r of valid) await applyRecord(tx, r, pageStats, now().toISOString())
-        for (const letter of bad) await tx.addDeadLetter(letter)
-        const last = page.nextCursor === null
-        // The checkpoint is saved in the same transaction as the records: both happen, or neither does.
-        await tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? since } : { cursor: page.nextCursor, maxSeen, watermark: since })
-      })
-    } catch (error) {
-      if (error instanceof LeaseLostError) return { status: "lease-lost", stats }
-      return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
-    }
-    Object.assign(stats, pageStats, { pages: stats.pages + 1, deadLettered: stats.deadLettered + bad.length })
+      const valid: SourceRecord[] = []
+      const bad: DeadLetter[] = []
+      for (const raw of page.records) {
+        try {
+          valid.push(validate(raw))
+        } catch (error) {
+          bad.push({ raw, reason: error instanceof Error ? error.message : "invalid record", at: now().toISOString() })
+        }
+      }
+      for (const r of valid) if (newer(r.modifiedAt, maxSeen)) maxSeen = r.modifiedAt
 
-    if (page.nextCursor === null) return { status: "completed", stats }
-    cursor = page.nextCursor
-  }
+      const pageStats: SyncStats = { ...stats, pages: 0 }
+      try {
+        await store.transaction(name, lease, async (tx) => {
+          heartbeat.signal.throwIfAborted()
+          for (const r of valid) await applyRecord(tx, r, pageStats, now().toISOString())
+          for (const letter of bad) await tx.addDeadLetter(letter)
+          const last = page.nextCursor === null
+          // The checkpoint is saved in the same transaction as the records: both happen, or neither does.
+          await tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? since } : { cursor: page.nextCursor, maxSeen, watermark: since })
+        })
+      } catch (error) {
+        if (error instanceof LeaseLostError) return { status: "lease-lost", stats }
+        return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
+      }
+      Object.assign(stats, pageStats, { pages: stats.pages + 1, deadLettered: stats.deadLettered + bad.length })
+
+      if (page.nextCursor === null) return { status: "completed", stats }
+      cursor = page.nextCursor
+    }
   } catch (error) {
     if (error instanceof LeaseLostError || heartbeat.signal.aborted) return { status: "lease-lost", stats }
     return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
-  } finally { await heartbeat.stop(); await store.release(lease) }
+  } finally { await heartbeat.stop(); await store.release(lease).catch(() => false) }
 }
 
 async function fetchWithRetry(source: Source, args: { cursor: string | null; since: string | null; signal?: AbortSignal }, retry: RetryOptions) {
@@ -183,20 +183,20 @@ export async function replayDeadLetters(options: Pick<RunOptions, "name" | "stor
   const lease = await store.acquire(name, 30_000)
   if (!lease) throw new Error("sync busy")
   try {
-  const letters = await store.listDeadLetters(name)
-  const fixed: string[] = []
-  const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
-  await store.transaction(name, lease, async (tx) => {
-    for (const letter of letters) {
-      let record: SourceRecord
-      try { record = validate(letter.raw) } catch { continue }
-      // Storage failures propagate: never swallow a failed write and resolve its letter.
-      await applyRecord(tx, record, stats, now().toISOString())
-      await tx.resolveDeadLetter(letter.id)
-      fixed.push(letter.id)
-    }
-  })
-  return { replayed: fixed.length, remaining: letters.length - fixed.length }
-  } finally { await store.release(lease) }
+    const letters = await store.listDeadLetters(name)
+    const fixed: string[] = []
+    const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
+    await store.transaction(name, lease, async (tx) => {
+      for (const letter of letters) {
+        let record: SourceRecord
+        try { record = validate(letter.raw) } catch { continue }
+        // Storage failures propagate: never swallow a failed write and resolve its letter.
+        await applyRecord(tx, record, stats, now().toISOString())
+        await tx.resolveDeadLetter(letter.id)
+        fixed.push(letter.id)
+      }
+    })
+    return { replayed: fixed.length, remaining: letters.length - fixed.length }
+  } finally { await store.release(lease).catch(() => false) }
 }
 

@@ -44,20 +44,26 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
       })])
     } finally { clearTimeout(timer!) }
   }
+  const dbQuery = (client: PoolClient, text: string, values: unknown[] = []) => {
+    // pg supports a per-query client-side read deadline in addition to DB timeouts.
+    const query = { text, values, query_timeout: timeout }
+    return client.query(query)
+  }
   async function session<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await checkout()
     let failure: Error | undefined
     const onError = (error: Error) => { failure = error }
     client.on('error', onError)
     try {
-      await client.query('BEGIN')
-      await client.query("SELECT set_config('statement_timeout',$1,true), set_config('lock_timeout',$1,true), set_config('idle_in_transaction_session_timeout',$1,true)", [String(timeout)])
+      await dbQuery(client, 'BEGIN')
+      await dbQuery(client, "SELECT set_config('statement_timeout',$1,true), set_config('lock_timeout',$1,true), set_config('idle_in_transaction_session_timeout',$1,true)", [String(timeout)])
       const result = await fn(client)
       if (failure) throw failure
-      await client.query('COMMIT')
+      await dbQuery(client, 'COMMIT')
       return result
     } catch (error) {
-      try { await client.query('ROLLBACK') } catch (rollbackError) { failure = rollbackError as Error }
+      failure = error instanceof Error ? error : new Error('database operation failed')
+      try { await dbQuery(client, 'ROLLBACK') } catch (rollbackError) { failure = rollbackError as Error }
       if ((error as { code?: string }).code === '55000') throw new LeaseLostError()
       throw error
     } finally {
@@ -66,7 +72,7 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
     }
   }
   const readRow = async (client: PoolClient, sync: string, id: string): Promise<Row | undefined> => {
-    const r = (await client.query('SELECT source_id AS id, data, base_hash AS "baseHash", source_modified_at AS "sourceModifiedAt", deleted FROM syncore_rows WHERE sync_name=$1 AND source_id=$2', [sync, id])).rows[0]
+    const r = (await dbQuery(client, 'SELECT source_id AS id, data, base_hash AS "baseHash", source_modified_at AS "sourceModifiedAt", deleted FROM syncore_rows WHERE sync_name=$1 AND source_id=$2', [sync, id])).rows[0]
     return r as Row | undefined
   }
   const leaseParams = (lease: SyncLease) => [lease.sync, lease.token, lease.epoch.toString()]
@@ -76,32 +82,32 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
     async acquire(sync, ttl) {
       syncValid(sync); ttlValid(ttl)
       return session(async client => {
-        const r = (await client.query('SELECT * FROM syncore_claim_lease($1,$2)', [sync, ttl])).rows[0]
+        const r = (await dbQuery(client, 'SELECT * FROM syncore_claim_lease($1,$2)', [sync, ttl])).rows[0]
         return r ? toLease(sync, r) : null
       })
     },
     async renew(lease, ttl) {
       ttlValid(ttl)
       return session(async client => {
-        const r = (await client.query('SELECT syncore_renew_lease($1,$2,$3,$4) AS expires_at', [...leaseParams(lease), ttl])).rows[0]!
+        const r = (await dbQuery(client, 'SELECT syncore_renew_lease($1,$2,$3,$4) AS expires_at', [...leaseParams(lease), ttl])).rows[0]!
         return r.expires_at ? { ...lease, expiresAt: r.expires_at } : null
       })
     },
     async release(lease) {
-      return session(async client => Boolean((await client.query('SELECT syncore_release_lease($1,$2,$3) AS released', leaseParams(lease))).rows[0]!.released))
+      return session(async client => Boolean((await dbQuery(client, 'SELECT syncore_release_lease($1,$2,$3) AS released', leaseParams(lease))).rows[0]!.released))
     },
     async getState(sync) {
-      return session(async client => (await client.query('SELECT cursor,max_seen AS "maxSeen",watermark FROM syncore_state WHERE sync_name=$1', [sync])).rows[0] as {cursor:string|null;maxSeen:string|null;watermark:string|null} ?? { cursor: null, maxSeen: null, watermark: null })
+      return session(async client => (await dbQuery(client, 'SELECT cursor,max_seen AS "maxSeen",watermark FROM syncore_state WHERE sync_name=$1', [sync])).rows[0] as {cursor:string|null;maxSeen:string|null;watermark:string|null} ?? { cursor: null, maxSeen: null, watermark: null })
     },
     async transaction(sync, lease, fn) {
       if (lease.sync !== sync) throw new LeaseLostError()
       return session(async client => {
-        const fence = () => client.query('SELECT syncore_assert_lease($1,$2,$3)', leaseParams(lease))
+        const fence = () => dbQuery(client, 'SELECT syncore_assert_lease($1,$2,$3)', leaseParams(lease))
         await fence() // Holds the per-sync row lock until COMMIT/ROLLBACK.
         let active = true
         const query = async (sql: string, args: unknown[]) => {
           if (!active) throw new Error('transaction is closed')
-          return client.query(sql, args)
+          return dbQuery(client, sql, args)
         }
         const tx: SyncTx = {
           async getRow(id) { if (!active) throw new Error('transaction is closed'); return readRow(client, sync, id) },
@@ -126,7 +132,13 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
           },
         }
         try {
-          const result = await fn(tx)
+          let timer: ReturnType<typeof setTimeout> | undefined
+          let result: Awaited<ReturnType<typeof fn>>
+          try {
+            result = await Promise.race([Promise.resolve().then(() => fn(tx)), new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('transaction timed out')), timeout)
+            })])
+          } finally { clearTimeout(timer) }
           await fence() // DB clock at the commit decision; successors wait on this row lock.
           return result
         } finally { active = false }
@@ -134,10 +146,10 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
     },
     async getRow(sync, id) { return session(client => readRow(client, sync, id)) },
     async listConflicts(sync) {
-      return session(async client => (await client.query('SELECT source_id AS "recordId",overwritten,applied,resolution,occurred_at AS at FROM syncore_conflicts WHERE sync_name=$1 ORDER BY occurred_at,id', [sync])).rows.map(r => ({ ...r, at: r.at.toISOString() })) as Awaited<ReturnType<SyncStore['listConflicts']>>)
+      return session(async client => (await dbQuery(client, 'SELECT source_id AS "recordId",overwritten,applied,resolution,occurred_at AS at FROM syncore_conflicts WHERE sync_name=$1 ORDER BY occurred_at,id', [sync])).rows.map(r => ({ ...r, at: r.at.toISOString() })) as Awaited<ReturnType<SyncStore['listConflicts']>>)
     },
     async listDeadLetters(sync) {
-      return session(async client => (await client.query('SELECT id,raw,reason,created_at AS at FROM syncore_dead_letters WHERE sync_name=$1 AND resolved_at IS NULL ORDER BY created_at,id', [sync])).rows.map(r => ({ ...r, at: r.at.toISOString() })) as Awaited<ReturnType<SyncStore['listDeadLetters']>>)
+      return session(async client => (await dbQuery(client, 'SELECT id,raw,reason,created_at AS at FROM syncore_dead_letters WHERE sync_name=$1 AND resolved_at IS NULL ORDER BY created_at,id', [sync])).rows.map(r => ({ ...r, at: r.at.toISOString() })) as Awaited<ReturnType<SyncStore['listDeadLetters']>>)
     },
   }
 }

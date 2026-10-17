@@ -74,15 +74,18 @@ export function memoryStore(clock: () => number = Date.now): SyncStore & {
         deadLetters: structuredClone(live.deadLetters),
         state: { ...live.state }, epoch: live.epoch, lease: live.lease,
       }
+      let active = true
+      const open = () => { if (!active) throw new Error('transaction is closed') }
       const tx: SyncTx = {
-        getRow: async (id) => work.rows.get(id),
-        putRow: async (row) => void work.rows.set(row.id, structuredClone(row)),
-        addConflict: async (c) => void work.conflicts.push(structuredClone(c)),
-        addDeadLetter: async (l) => void work.deadLetters.push({ ...structuredClone(l), id: randomUUID() }),
-        resolveDeadLetter: async (id) => { work.deadLetters = work.deadLetters.filter(l => l.id !== id) },
-        setState: async (s) => void (work.state = { ...s }),
+        getRow: async (id) => { open(); return structuredClone(work.rows.get(id)) },
+        putRow: async (row) => { open(); work.rows.set(row.id, structuredClone(row)) },
+        addConflict: async (c) => { open(); work.conflicts.push(structuredClone(c)) },
+        addDeadLetter: async (l) => { open(); work.deadLetters.push({ ...structuredClone(l), id: randomUUID() }) },
+        resolveDeadLetter: async (id) => { open(); work.deadLetters = work.deadLetters.filter(l => l.id !== id) },
+        setState: async (s) => { open(); work.state = { ...s } },
       }
-      const result = await fn(tx)
+      let result: Awaited<ReturnType<typeof fn>>
+      try { result = await fn(tx) } finally { active = false }
       check(lease) // verify *after* async work and before commit, while serialized
       live.rows = work.rows
       live.conflicts = work.conflicts

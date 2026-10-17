@@ -139,3 +139,99 @@ test('Gate 2 SIGKILL rolls back a page; commit-response loss resumes durable che
     assert.equal((await store.listConflicts(name)).length, 0)
   }
 })
+
+test('Gate 2 renewal waiting behind a page lock cannot revive an expired owner', { skip: !url, timeout: 10000 }, async t => {
+  const pool = new Pool({ connectionString: url })
+  const store = postgresStore(pool)
+  const name = randomUUID()
+  const lease = (await store.acquire(name, 500))!
+  const holder = await pool.connect()
+  const waiter = await pool.connect()
+  t.after(async () => { await holder.query('ROLLBACK').catch(() => {}); holder.release(); waiter.release(); await pool.end() })
+  await holder.query('BEGIN')
+  await holder.query('SELECT * FROM syncore_leases WHERE sync_name=$1 FOR UPDATE', [name])
+  const pid = (await waiter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+  const renewal = waiter.query('SELECT syncore_renew_lease($1,$2,$3,$4) AS expiry', [name, lease.token, lease.epoch.toString(), 10000])
+  // Observe the waiter actually blocked on the held row before expiring it.
+  let blocked = false
+  for (let i = 0; i < 100; i++) {
+    blocked = (await pool.query("SELECT wait_event_type='Lock' AS blocked FROM pg_stat_activity WHERE pid=$1", [pid])).rows[0]?.blocked
+    if (blocked) break
+    await pool.query('SELECT pg_sleep(0.01)')
+  }
+  assert.equal(blocked, true)
+  await holder.query('SELECT pg_sleep(0.6)')
+  await holder.query('COMMIT')
+  assert.equal((await renewal).rows[0].expiry, null)
+  assert.ok((await store.acquire(name, 10000))!.epoch > lease.epoch)
+})
+
+test('Gate 2 real heartbeat retains a slow fetch; distinct syncs and payload limits', { skip: !url, timeout: 10000 }, async t => {
+  const pool = new Pool({ connectionString: url, max: 6 })
+  t.after(async () => pool.end())
+  const store = postgresStore(pool, { maxPayloadBytes: 100 })
+  const name = randomUUID()
+  assert.equal((await runSync({ name, store, leaseTtlMs: 600, source: { async fetchPage() {
+    await pool.query('SELECT pg_sleep(1.4)')
+    assert.equal(await store.acquire(name, 10000), null)
+    return { records: [{ id: 'slow', modifiedAt: at, data: {} }], nextCursor: null }
+  } } })).status, 'completed')
+  const lease = (await store.acquire(name, 10000))!
+  await assert.rejects(store.transaction(name, lease, tx => tx.putRow({ ...row('oversized'), data: { large: 'a'.repeat(101) } })), /payload/)
+  let release!: () => void
+  let entered!: () => void
+  const ready = new Promise<void>(resolve => { entered = resolve })
+  const wait = new Promise<void>(resolve => { release = resolve })
+  const slow = store.transaction(name, lease, async tx => { await tx.putRow(row('first')); entered(); await wait })
+  await ready
+  const otherName = randomUUID()
+  const otherLease = (await store.acquire(otherName, 10000))!
+  try {
+    await store.transaction(otherName, otherLease, tx => tx.putRow(row('independent')))
+    assert.ok(await store.getRow(otherName, 'independent'))
+  } finally { release() }
+  await slow
+  await store.release(lease)
+  await store.release(otherLease)
+})
+
+test('Gate 2 backend termination rolls back and pool continues; checkout is bounded', { skip: !url, timeout: 10000 }, async t => {
+  const pool = new Pool({ connectionString: url, max: 2 })
+  t.after(async () => pool.end())
+  const store = postgresStore(pool)
+  const name = randomUUID()
+  const lease = (await store.acquire(name, 10000))!
+  await assert.rejects(store.transaction(name, lease, async tx => {
+    await tx.putRow(row('killed'))
+    const active = (await pool.query("SELECT pid FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND state='idle in transaction' AND query LIKE 'INSERT INTO syncore_rows%'" )).rows
+    assert.equal(active.length, 1)
+    await pool.query('SELECT pg_terminate_backend($1)', [active[0].pid])
+  }))
+  assert.equal(await store.getRow(name, 'killed'), undefined)
+  await store.transaction(name, lease, tx => tx.putRow(row('recovered')))
+  assert.ok(await store.getRow(name, 'recovered'))
+  await store.release(lease)
+  const occupied = new Pool({ connectionString: url, max: 1 })
+  const connection = await occupied.connect()
+  const limited = postgresStore(occupied, { transactionTimeoutMs: 50 })
+  await assert.rejects(limited.getState(name), /checkout timed out/)
+  connection.release()
+  assert.equal((await limited.getState(name)).cursor, null)
+  await occupied.end()
+})
+
+test('Gate 2 transaction deadline rejects hung callbacks and closes escaped handles', { skip: !url, timeout: 10000 }, async t => {
+  const store = postgresStore({ connectionString: url }, { transactionTimeoutMs: 150 })
+  t.after(() => store.close())
+  const name = randomUUID()
+  const lease = (await store.acquire(name, 10000))!
+  let leaked!: import('./types.js').SyncTx
+  await assert.rejects(store.transaction(name, lease, async tx => {
+    leaked = tx
+    await tx.putRow(row('deadline'))
+    await new Promise(() => {})
+  }), /timed out|timeout/)
+  await assert.rejects(leaked.setState({ cursor: 'late', maxSeen: null, watermark: null }), /closed/)
+  assert.equal(await store.getRow(name, 'deadline'), undefined)
+  await store.release(lease)
+})

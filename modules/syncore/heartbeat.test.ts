@@ -26,3 +26,18 @@ test('failed heartbeat stops a hanging source and prevents any page commit', { t
   assert.equal(result.status, 'lease-lost')
   assert.equal(result.stats.pages, 0)
 })
+
+test('transaction handles cannot mutate committed memory after callback ends', async () => {
+  const store = memoryStore()
+  const lease = (await store.acquire('closed-tx', 10000))!
+  let leaked!: import('./types.js').SyncTx
+  await store.transaction('closed-tx', lease, async tx => { leaked = tx })
+  await assert.rejects(leaked.setState({ cursor: 'outside', maxSeen: null, watermark: null }), /closed/)
+  assert.equal((await store.getState('closed-tx')).cursor, null)
+})
+
+test('release failure does not replace a committed runner result', async () => {
+  const store = memoryStore()
+  store.release = async () => { throw new Error('database unavailable') }
+  assert.equal((await runSync({ name: 'release-error', store, source: { async fetchPage() { return { records: [], nextCursor: null } } } })).status, 'completed')
+})
