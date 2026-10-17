@@ -39,4 +39,8 @@ jobs:
         run: psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/001_initial.sql
       - name: Verify migration is idempotent
         run: psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/001_initial.sql
+      - name: Apply lease functions and run SQL integration contract
+        run: |
+          psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/002_lease_operations.sql
+          psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/lease-contract.test.sql
       - run: pnpm test
