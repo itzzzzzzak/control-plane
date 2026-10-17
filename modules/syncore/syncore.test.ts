@@ -143,7 +143,7 @@ test("the second run is incremental: it asks only for changes since the watermar
   await runSync({ name: "zoho", source, store })
   data = [...data.slice(0, 4), rec(5, { modifiedAt: T(900), data: { name: "Customer 5", phone: "A5-changed" } })]
   const result = await runSync({ name: "zoho", source, store })
-  assert.equal(calls.at(-1)!.since, T(5))
+  assert.equal(calls.at(-1)!.since, new Date(Date.parse(T(5)) - 60000).toISOString())
   assert.equal(result.stats.updated, 1) // only the changed record came back (plus none unchanged)
   assert.equal((await store.getRow("zoho", "r5"))?.data.phone, "A5-changed")
 })

@@ -43,6 +43,8 @@ export interface Row {
 }
 
 export interface SyncState {
+  /** Exact source query pinned to an unfinished cursor; absent for legacy/completed runs. */
+  runSince?: string | null
   /** Where to continue inside an unfinished run; null when no run is in progress. */
   cursor: string | null
   /** Highest `modifiedAt` seen so far in the unfinished run. */

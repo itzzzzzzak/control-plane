@@ -15,6 +15,7 @@ BEGIN;
 SELECT pg_advisory_xact_lock(734938291);
 \i modules/syncore/migrations/001_initial.sql
 \i modules/syncore/migrations/002_lease_operations.sql
+\i modules/syncore/migrations/003_query_bounds.sql
 COMMIT;
 SQL
 ```
@@ -24,6 +25,11 @@ schema changes need new numbered migrations; do not edit an applied table defini
 and expect `CREATE TABLE IF NOT EXISTS` to upgrade it. Lease rows are never deleted:
 they retain their monotonic fencing epochs after release and restart. Back up all
 `syncore_*` tables together; never restore an old lease table beneath active workers.
+
+Stop/drain old workers before upgrading to Gate 4. Apply migration 003 before starting
+new workers. Do not mix old and new engine versions on unfinished cursors: old code
+does not understand the pinned query boundary. Rollback requires completing or
+explicitly reconciling those runs first; never reset a cursor just to make rollback easy.
 
 Use a separate runtime database identity with only CONNECT, schema USAGE, and required
 SELECT/INSERT/UPDATE privileges on `syncore_*` tables plus EXECUTE on the lease
@@ -93,5 +99,8 @@ never run them against a production database. CI supplies PostgreSQL 17 and requ
 all DB tests on Node 22 and 24. Without a test URL, local DB tests are visibly skipped
 and cannot be used as evidence for this reliability gate.
 
-Next milestones include incremental boundary correctness, same-timestamp revisions,
-a real source adapter and reconciliation. Gate 2 does not certify these behaviors.
+Gate 3 adds revision/tombstone correctness. Gate 4 adds a configurable inclusive
+lookback (default 60 seconds, range 0–24 hours) and pins the exact query boundary
+with unfinished cursors. Late events older than that window still need reconciliation.
+A real source adapter, source snapshot guarantees and reconciliation remain subsequent
+work; none are certified by storage durability alone.

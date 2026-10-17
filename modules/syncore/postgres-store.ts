@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg'
-import { LeaseLostError, type Row, type SyncLease, type SyncStore, type SyncTx } from './types.js'
+import { LeaseLostError, type Row, type SyncLease, type SyncStore, type SyncTx, type SyncState } from './types.js'
 
 export interface PostgresStoreOptions {
   transactionTimeoutMs?: number
@@ -97,7 +97,11 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
       return session(async client => Boolean((await dbQuery(client, 'SELECT syncore_release_lease($1,$2,$3) AS released', leaseParams(lease))).rows[0]!.released))
     },
     async getState(sync) {
-      return session(async client => (await dbQuery(client, 'SELECT cursor,max_seen AS "maxSeen",watermark FROM syncore_state WHERE sync_name=$1', [sync])).rows[0] as {cursor:string|null;maxSeen:string|null;watermark:string|null} ?? { cursor: null, maxSeen: null, watermark: null })
+      return session(async client => {
+        const r = (await dbQuery(client, 'SELECT cursor,max_seen AS "maxSeen",watermark,run_since,query_since_set FROM syncore_state WHERE sync_name=$1', [sync])).rows[0]
+        if (!r) return { cursor: null, maxSeen: null, watermark: null }
+        return { cursor: r.cursor, maxSeen: r.maxSeen, watermark: r.watermark, ...(r.query_since_set ? { runSince: r.run_since } : {}) } as SyncState
+      })
     },
     async transaction(sync, lease, fn) {
       if (lease.sync !== sync) throw new LeaseLostError()
@@ -127,8 +131,8 @@ export function postgresStore(config: Pool | PoolConfig, options: PostgresStoreO
             await query('UPDATE syncore_dead_letters SET resolved_at=clock_timestamp() WHERE sync_name=$1 AND id=$2 AND resolved_at IS NULL', [sync, id])
           },
           async setState(s) {
-            await query(`INSERT INTO syncore_state(sync_name,cursor,max_seen,watermark) VALUES($1,$2,$3,$4)
-              ON CONFLICT(sync_name) DO UPDATE SET cursor=EXCLUDED.cursor,max_seen=EXCLUDED.max_seen,watermark=EXCLUDED.watermark,updated_at=clock_timestamp()`, [sync, s.cursor, s.maxSeen, s.watermark])
+            await query(`INSERT INTO syncore_state(sync_name,cursor,max_seen,watermark,run_since,query_since_set) VALUES($1,$2,$3,$4,$5,$6)
+              ON CONFLICT(sync_name) DO UPDATE SET cursor=EXCLUDED.cursor,max_seen=EXCLUDED.max_seen,watermark=EXCLUDED.watermark,run_since=EXCLUDED.run_since,query_since_set=EXCLUDED.query_since_set,updated_at=clock_timestamp()`, [sync, s.cursor, s.maxSeen, s.watermark, s.runSince ?? null, s.runSince !== undefined])
           },
         }
         try {
