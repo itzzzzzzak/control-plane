@@ -29,6 +29,8 @@ verification. This milestone changes record ordering semantics, not lease storag
 7. Replay obeys the same rules; ambiguity or storage failure leaves dead letters
    unresolved. A failed page does not publish speculative row counts or conflicts.
 
+8. A completed stale/overlap page cannot move the durable watermark backward.
+
 ## Verification
 
 Shared executable contracts run against both stores. PostgreSQL contracts must run

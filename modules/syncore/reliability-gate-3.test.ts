@@ -19,6 +19,7 @@ for (const backend of ['memory', 'postgres'] as const) {
     assert.equal((await store.getRow(name, 'unseen'))?.deleted, true)
     await deliver(store, name, [rec('unseen', 4)])
     assert.equal((await store.getRow(name, 'unseen'))?.deleted, true)
+    assert.equal((await store.getState(name)).watermark, at(5), 'stale pages cannot move the watermark backward')
     await deliver(store, name, [gone('unseen', 8)])
     assert.equal((await store.getRow(name, 'unseen'))?.sourceModifiedAt, at(8))
     await deliver(store, name, [rec('unseen', 7), rec('unseen', 8)])

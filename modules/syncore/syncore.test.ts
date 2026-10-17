@@ -124,13 +124,13 @@ test("a malformed record is dead-lettered with its reason; the rest of the page 
   assert.equal((await store.getRow("zoho", "bad"))?.data.name, "x")
 })
 
-test("a record deleted at the source becomes a tombstone; deleting an unknown record is ignored", async () => {
+test("source deletes retain tombstones, including unseen records", async () => {
   const store = memoryStore()
   await runSync({ name: "zoho", source: fakeSource(() => [rec(1)]).source, store })
   const gone = [{ id: "r1", modifiedAt: T(600), deleted: true }, { id: "never-seen", modifiedAt: T(601), deleted: true }]
   const result = await runSync({ name: "zoho", source: fakeSource(() => gone).source, store })
-  assert.equal(result.stats.deleted, 1)
-  assert.equal(result.stats.skipped, 1)
+  assert.equal(result.stats.deleted, 2)
+  assert.equal(result.stats.skipped, 0)
   const row = await store.getRow("zoho", "r1")
   assert.equal(row?.deleted, true)
   assert.equal(row?.data.phone, "A1") // kept for audit

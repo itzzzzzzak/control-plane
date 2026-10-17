@@ -1,6 +1,6 @@
 import { startHeartbeat, abortable } from "./heartbeat.js"
 import { createHash } from "node:crypto"
-import { LeaseLostError, SourceError, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
+import { AmbiguousRevisionError, LeaseLostError, SourceError, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
 
 export interface SyncStats {
   pages: number
@@ -63,19 +63,30 @@ async function applyRecord(tx: SyncTx, rec: SourceRecord, stats: SyncStats, at: 
     stats.skipped++ // an older delivery than what we already have
     return
   }
+  const sameInstant = row && Date.parse(rec.modifiedAt) === Date.parse(row.sourceModifiedAt)
   if (rec.deleted) {
-    if (!row || row.deleted) {
-      stats.skipped++
-      return
-    }
-    await tx.putRow({ ...row, deleted: true, sourceModifiedAt: rec.modifiedAt })
+    if (row?.deleted && sameInstant) { stats.skipped++; return }
+    // Keep a version even for an unseen deletion, so delayed creates stay fenced.
+    await tx.putRow(row
+      ? { ...row, deleted: true, sourceModifiedAt: rec.modifiedAt }
+      : { id: rec.id, data: {}, baseHash: hashData({}), deleted: true, sourceModifiedAt: rec.modifiedAt })
     stats.deleted++
     return
   }
+  // Deletes win ties. Only a strictly newer source version may resurrect the row.
+  if (row?.deleted && sameInstant) { stats.skipped++; return }
   const newHash = hashData(rec.data)
   if (!row) {
     await tx.putRow({ id: rec.id, data: rec.data, baseHash: newHash, sourceModifiedAt: rec.modifiedAt, deleted: false })
     stats.created++
+    return
+  }
+  if (sameInstant && row.baseHash !== newHash) throw new AmbiguousRevisionError(rec.id)
+  if (!row.deleted && row.baseHash === newHash) {
+    // No source content change: preserve any local edits, including on duplicate replay.
+    if (sameInstant) { stats.skipped++; return }
+    await tx.putRow({ ...row, sourceModifiedAt: rec.modifiedAt })
+    stats.unchanged++
     return
   }
   const locallyEdited = !row.deleted && hashData(row.data) !== row.baseHash
@@ -83,13 +94,6 @@ async function applyRecord(tx: SyncTx, rec: SourceRecord, stats: SyncStats, at: 
     // Both sides changed: the source wins, but what it overwrites is recorded first.
     await tx.addConflict({ recordId: rec.id, overwritten: row.data, applied: rec.data, resolution: "source-wins", at })
     stats.conflicts++
-  } else if (!row.deleted && row.baseHash === newHash && !locallyEdited && row.sourceModifiedAt === rec.modifiedAt) {
-    stats.skipped++ // the same delivery again
-    return
-  } else if (!row.deleted && row.baseHash === newHash && !locallyEdited) {
-    await tx.putRow({ ...row, sourceModifiedAt: rec.modifiedAt })
-    stats.unchanged++
-    return
   }
   await tx.putRow({ id: rec.id, data: rec.data, baseHash: newHash, sourceModifiedAt: rec.modifiedAt, deleted: false })
   stats.updated++
@@ -115,6 +119,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     const since = state.watermark
     let cursor = state.cursor
     let maxSeen = state.maxSeen
+    if (since !== null && newer(since, maxSeen)) maxSeen = since
 
     for (;;) {
       heartbeat.signal.throwIfAborted()
