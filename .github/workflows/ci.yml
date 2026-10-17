@@ -5,10 +5,31 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: syncore
+          POSTGRES_PASSWORD: syncore_ci_only
+          POSTGRES_DB: syncore_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U syncore -d syncore_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      SYNCORE_TEST_DATABASE_URL: postgresql://syncore:syncore_ci_only@localhost:5432/syncore_test
     strategy:
+      fail-fast: false
       matrix:
         node: [22, 24]
     steps:
@@ -19,5 +40,15 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Builds, enforces the module boundaries, then runs every test.
+      - name: Apply SyncCore migration to real PostgreSQL
+        run: psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/001_initial.sql
+      - name: Verify migration is idempotent
+        run: psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/001_initial.sql
+      - name: Apply lease functions and run SQL integration contract
+        run: |
+          psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/002_lease_operations.sql
+          psql "$SYNCORE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f modules/syncore/migrations/lease-contract.test.sql
       - run: pnpm test
+      - name: Dependency security audit
+        run: pnpm audit --audit-level=high
+

@@ -17,7 +17,7 @@ export interface Page {
 
 export interface Source {
   /** `since` is the watermark of the last completed run (null on the first run): return only changes at or after it. */
-  fetchPage(args: { cursor: string | null; since: string | null }): Promise<Page>
+  fetchPage(args: { cursor: string | null; since: string | null; signal?: AbortSignal }): Promise<Page>
 }
 
 /** Thrown by a source. `retryable` errors are retried; others stop the run. */
@@ -67,13 +67,16 @@ export interface DeadLetter {
   at: string
 }
 
+export interface StoredDeadLetter extends DeadLetter { id: string }
+
 /** Everything the engine may do inside one page's transaction. */
 export interface SyncTx {
-  getRow(id: string): Row | undefined
-  putRow(row: Row): void
-  addConflict(conflict: Conflict): void
-  addDeadLetter(letter: DeadLetter): void
-  setState(state: SyncState): void
+  getRow(id: string): Promise<Row | undefined>
+  putRow(row: Row): Promise<void>
+  addConflict(conflict: Conflict): Promise<void>
+  addDeadLetter(letter: DeadLetter): Promise<void>
+  setState(state: SyncState): Promise<void>
+  resolveDeadLetter(id: string): Promise<void>
 }
 
 export interface SyncLease {
@@ -96,7 +99,6 @@ export interface SyncStore {
   transaction<T>(sync: string, lease: SyncLease, fn: (tx: SyncTx) => T | Promise<T>): Promise<T>
   getRow(sync: string, id: string): Promise<Row | undefined>
   listConflicts(sync: string): Promise<Conflict[]>
-  listDeadLetters(sync: string): Promise<DeadLetter[]>
-  /** Remove the dead letters at these positions (used by replay). */
-  removeDeadLetters(sync: string, lease: SyncLease, indexes: number[]): Promise<void>
+  listDeadLetters(sync: string): Promise<StoredDeadLetter[]>
 }
+

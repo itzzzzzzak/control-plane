@@ -46,13 +46,13 @@ test("RG1 RED: overlapping write transactions must not lose a committed row", as
   const release = deferred()
   const lease = (await store.acquire("zoho", 30000))!
   const slow = store.transaction("zoho", lease, async (tx) => {
-    tx.putRow(row("slow"))
+    await tx.putRow(row("slow"))
     entered.resolve()
     await release.promise
   })
   await entered.promise
   // Current copy-on-write store commits this then the slow snapshot replaces it.
-  const fast = store.transaction("zoho", lease, (tx) => tx.putRow(row("fast")))
+  const fast = store.transaction("zoho", lease, async (tx) => await tx.putRow(row("fast")))
   release.resolve()
   await Promise.all([slow, fast])
   assert.ok(await store.getRow("zoho", "slow"))
@@ -67,7 +67,7 @@ test("RG1: expired lease is fenced even if old transaction resumes", async () =>
   const entered = deferred()
   const resume = deferred()
   const oldTx = store.transaction("zoho", old, async (tx) => {
-    tx.putRow(row("stale"))
+    await tx.putRow(row("stale"))
     entered.resolve()
     await resume.promise
   })
@@ -78,7 +78,7 @@ test("RG1: expired lease is fenced even if old transaction resumes", async () =>
   const replacement = (await store.acquire("zoho", 100))!
   assert.ok(replacement.epoch > old.epoch)
   assert.equal(await store.release(old), false)
-  await store.transaction("zoho", replacement, (tx) => tx.putRow(row("fresh")))
+  await store.transaction("zoho", replacement, async (tx) => await tx.putRow(row("fresh")))
   assert.equal(await store.getRow("zoho", "stale"), undefined)
   assert.ok(await store.getRow("zoho", "fresh"))
 })
@@ -90,13 +90,14 @@ test("RG1: distinct sync names can run and commit independently", async () => {
   const entered = deferred()
   const resume = deferred()
   const slow = store.transaction("a", a, async (tx) => {
-    tx.putRow(row("a"))
+    await tx.putRow(row("a"))
     entered.resolve()
     await resume.promise
   })
   await entered.promise
-  await store.transaction("b", b, (tx) => tx.putRow(row("b")))
+  await store.transaction("b", b, async (tx) => await tx.putRow(row("b")))
   assert.ok(await store.getRow("b", "b"))
   resume.resolve()
   await slow
 })
+

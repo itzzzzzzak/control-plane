@@ -1,5 +1,6 @@
+import { startHeartbeat, abortable } from "./heartbeat.js"
 import { createHash } from "node:crypto"
-import { LeaseLostError, SourceError, type SyncLease, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
+import { LeaseLostError, SourceError, type DeadLetter, type Source, type SourceRecord, type SyncStore, type SyncTx } from "./types.js"
 
 export interface SyncStats {
   pages: number
@@ -56,8 +57,8 @@ export function validateRecord(raw: unknown): SourceRecord {
 const newer = (a: string, b: string | null) => b === null || Date.parse(a) > Date.parse(b)
 
 /** Apply one validated record inside a transaction. Idempotent: applying it twice equals applying it once. */
-function applyRecord(tx: SyncTx, rec: SourceRecord, stats: SyncStats, at: string): void {
-  const row = tx.getRow(rec.id)
+async function applyRecord(tx: SyncTx, rec: SourceRecord, stats: SyncStats, at: string): Promise<void> {
+  const row = await tx.getRow(rec.id)
   if (row && Date.parse(rec.modifiedAt) < Date.parse(row.sourceModifiedAt)) {
     stats.skipped++ // an older delivery than what we already have
     return
@@ -67,30 +68,30 @@ function applyRecord(tx: SyncTx, rec: SourceRecord, stats: SyncStats, at: string
       stats.skipped++
       return
     }
-    tx.putRow({ ...row, deleted: true, sourceModifiedAt: rec.modifiedAt })
+    await tx.putRow({ ...row, deleted: true, sourceModifiedAt: rec.modifiedAt })
     stats.deleted++
     return
   }
   const newHash = hashData(rec.data)
   if (!row) {
-    tx.putRow({ id: rec.id, data: rec.data, baseHash: newHash, sourceModifiedAt: rec.modifiedAt, deleted: false })
+    await tx.putRow({ id: rec.id, data: rec.data, baseHash: newHash, sourceModifiedAt: rec.modifiedAt, deleted: false })
     stats.created++
     return
   }
   const locallyEdited = !row.deleted && hashData(row.data) !== row.baseHash
   if (locallyEdited && hashData(row.data) !== newHash) {
     // Both sides changed: the source wins, but what it overwrites is recorded first.
-    tx.addConflict({ recordId: rec.id, overwritten: row.data, applied: rec.data, resolution: "source-wins", at })
+    await tx.addConflict({ recordId: rec.id, overwritten: row.data, applied: rec.data, resolution: "source-wins", at })
     stats.conflicts++
   } else if (!row.deleted && row.baseHash === newHash && !locallyEdited && row.sourceModifiedAt === rec.modifiedAt) {
     stats.skipped++ // the same delivery again
     return
   } else if (!row.deleted && row.baseHash === newHash && !locallyEdited) {
-    tx.putRow({ ...row, sourceModifiedAt: rec.modifiedAt })
+    await tx.putRow({ ...row, sourceModifiedAt: rec.modifiedAt })
     stats.unchanged++
     return
   }
-  tx.putRow({ id: rec.id, data: rec.data, baseHash: newHash, sourceModifiedAt: rec.modifiedAt, deleted: false })
+  await tx.putRow({ id: rec.id, data: rec.data, baseHash: newHash, sourceModifiedAt: rec.modifiedAt, deleted: false })
   stats.updated++
 }
 
@@ -106,65 +107,70 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
   const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
 
   const ttl = options.leaseTtlMs ?? 30_000
-  let lease = await store.acquire(name, ttl)
+  const lease = await store.acquire(name, ttl)
   if (!lease) return { status: "busy", stats }
+  const heartbeat = startHeartbeat(store, lease, ttl)
   try {
-  const state = await store.getState(name)
-  const since = state.watermark
-  let cursor = state.cursor
-  let maxSeen = state.maxSeen
+    const state = await store.getState(name)
+    const since = state.watermark
+    let cursor = state.cursor
+    let maxSeen = state.maxSeen
 
-  for (;;) {
-    const renewed = await store.renew(lease, ttl)
-    if (!renewed) return { status: "lease-lost", stats }
-    lease = renewed
-    let page
-    try {
-      page = await fetchWithRetry(source, { cursor, since }, retry)
-    } catch (error) {
-      return { status: "stopped", stats, error: error instanceof Error ? error.message : "unknown error" }
-    }
-
-    const valid: SourceRecord[] = []
-    const bad: DeadLetter[] = []
-    for (const raw of page.records) {
+    for (;;) {
+      heartbeat.signal.throwIfAborted()
+      let page
       try {
-        valid.push(validate(raw))
+        page = await abortable(fetchWithRetry(source, { cursor, since, signal: heartbeat.signal }, retry), heartbeat.signal)
       } catch (error) {
-        bad.push({ raw, reason: error instanceof Error ? error.message : "invalid record", at: now().toISOString() })
+        if (heartbeat.signal.aborted) return { status: "lease-lost", stats }
+        return { status: "stopped", stats, error: error instanceof Error ? error.message : "unknown error" }
       }
-    }
-    for (const r of valid) if (newer(r.modifiedAt, maxSeen)) maxSeen = r.modifiedAt
 
-    const pageStats: SyncStats = { ...stats, pages: 0 }
-    try {
-      await store.transaction(name, lease, (tx) => {
-        for (const r of valid) applyRecord(tx, r, pageStats, now().toISOString())
-        for (const letter of bad) tx.addDeadLetter(letter)
-        const last = page.nextCursor === null
-        // The checkpoint is saved in the same transaction as the records: both happen, or neither does.
-        tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? since } : { cursor: page.nextCursor, maxSeen, watermark: since })
-      })
-    } catch (error) {
-      if (error instanceof LeaseLostError) return { status: "lease-lost", stats }
-      return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
-    }
-    Object.assign(stats, pageStats, { pages: stats.pages + 1, deadLettered: stats.deadLettered + bad.length })
+      const valid: SourceRecord[] = []
+      const bad: DeadLetter[] = []
+      for (const raw of page.records) {
+        try {
+          valid.push(validate(raw))
+        } catch (error) {
+          bad.push({ raw, reason: error instanceof Error ? error.message : "invalid record", at: now().toISOString() })
+        }
+      }
+      for (const r of valid) if (newer(r.modifiedAt, maxSeen)) maxSeen = r.modifiedAt
 
-    if (page.nextCursor === null) return { status: "completed", stats }
-    cursor = page.nextCursor
-  }
-  } finally { await store.release(lease) }
+      const pageStats: SyncStats = { ...stats, pages: 0 }
+      try {
+        await store.transaction(name, lease, async (tx) => {
+          heartbeat.signal.throwIfAborted()
+          for (const r of valid) await applyRecord(tx, r, pageStats, now().toISOString())
+          for (const letter of bad) await tx.addDeadLetter(letter)
+          const last = page.nextCursor === null
+          // The checkpoint is saved in the same transaction as the records: both happen, or neither does.
+          await tx.setState(last ? { cursor: null, maxSeen: null, watermark: maxSeen ?? since } : { cursor: page.nextCursor, maxSeen, watermark: since })
+        })
+      } catch (error) {
+        if (error instanceof LeaseLostError) return { status: "lease-lost", stats }
+        return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
+      }
+      Object.assign(stats, pageStats, { pages: stats.pages + 1, deadLettered: stats.deadLettered + bad.length })
+
+      if (page.nextCursor === null) return { status: "completed", stats }
+      cursor = page.nextCursor
+    }
+  } catch (error) {
+    if (error instanceof LeaseLostError || heartbeat.signal.aborted) return { status: "lease-lost", stats }
+    return { status: "stopped", stats, error: error instanceof Error ? error.message : "store error" }
+  } finally { await heartbeat.stop(); await store.release(lease).catch(() => false) }
 }
 
-async function fetchWithRetry(source: Source, args: { cursor: string | null; since: string | null }, retry: RetryOptions) {
+async function fetchWithRetry(source: Source, args: { cursor: string | null; since: string | null; signal?: AbortSignal }, retry: RetryOptions) {
   for (let attempt = 1; ; attempt++) {
     try {
+      args.signal?.throwIfAborted()
       return await source.fetchPage(args)
     } catch (error) {
       const retryable = error instanceof SourceError && error.retryable
       if (!retryable || attempt >= retry.maxAttempts) throw error
-      await retry.sleep((error as SourceError).retryAfterMs ?? retry.baseDelayMs * 2 ** (attempt - 1))
+      await abortable(retry.sleep((error as SourceError).retryAfterMs ?? retry.baseDelayMs * 2 ** (attempt - 1)), args.signal)
     }
   }
 }
@@ -177,20 +183,20 @@ export async function replayDeadLetters(options: Pick<RunOptions, "name" | "stor
   const lease = await store.acquire(name, 30_000)
   if (!lease) throw new Error("sync busy")
   try {
-  const letters = await store.listDeadLetters(name)
-  const fixed: number[] = []
-  const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
-  await store.transaction(name, lease, (tx) => {
-    letters.forEach((letter, i) => {
-      try {
-        applyRecord(tx, validate(letter.raw), stats, now().toISOString())
-        fixed.push(i)
-      } catch {
-        /* still invalid: stays a dead letter */
+    const letters = await store.listDeadLetters(name)
+    const fixed: string[] = []
+    const stats: SyncStats = { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 }
+    await store.transaction(name, lease, async (tx) => {
+      for (const letter of letters) {
+        let record: SourceRecord
+        try { record = validate(letter.raw) } catch { continue }
+        // Storage failures propagate: never swallow a failed write and resolve its letter.
+        await applyRecord(tx, record, stats, now().toISOString())
+        await tx.resolveDeadLetter(letter.id)
+        fixed.push(letter.id)
       }
     })
-  })
-  await store.removeDeadLetters(name, lease, fixed)
-  return { replayed: fixed.length, remaining: letters.length - fixed.length }
-  } finally { await store.release(lease) }
+    return { replayed: fixed.length, remaining: letters.length - fixed.length }
+  } finally { await store.release(lease).catch(() => false) }
 }
+
