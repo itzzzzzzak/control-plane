@@ -1,6 +1,6 @@
 # SyncCore Reliability Gate 4: incremental query boundaries
 
-Status: RED CONTRACT. Gate 3 merged in PR #3 after 35 real-database CI tests.
+Status: IMPLEMENTED AND VERIFIED; final-head CI and security review required before merge. Gate 3 merged in PR #3 after 35 real-database CI tests.
 
 ## Contract
 
@@ -33,3 +33,20 @@ inside the window, stale deliveries without watermark regression, resume after a
 source failure/pool restart and changed configuration, legacy checkpoints, deliberate
 full-run null, clearing pinned bounds, configuration limits and all prior crash gates.
 Real PostgreSQL tests inspect the persisted columns; no mock DB result counts.
+
+## Evidence and deployment review
+
+- RED [CI 39027723129](https://github.com/itzzzzzzak/control-plane/actions/runs/39027723129)
+  reproduced missing lookback/resume behavior in both stores and missing input bounds.
+- Implementation `187331228ff4e2e4918e89e769d087f2fc89a731` passed
+  [CI 39027835752](https://github.com/itzzzzzzak/control-plane/actions/runs/39027835752):
+  Node 22 and 24, PostgreSQL 17, **39 tests passed, zero skipped**, clean dependency audit.
+  Migration idempotency and populated legacy upgrade execute on PostgreSQL.
+- No new dependencies, external endpoints, permissions or dynamic production SQL.
+  Lookback bounds are validated before acquiring a lease; query metadata remains inside
+  the existing fenced page transaction. Final documentation/refactor head requires CI.
+- Deployment must stop/drain old workers, migrate, then start the new version. Do not
+  mix old code that ignores `runSince` with unfinished new-format cursors. The migration
+  preserves data but cannot make old engine code understand new query semantics.
+- Source identity, field configuration and snapshot guarantees are the host/source
+  adapter's responsibility. Events outside the configured lookback need reconciliation.

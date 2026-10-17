@@ -122,9 +122,9 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     const state = await store.getState(name)
     const watermark = state.watermark
     // Legacy unfinished runs retain their old watermark query, without a new overlap.
-    const since = state.cursor !== null
-      ? (state.runSince === undefined ? watermark : state.runSince)
-      : watermark === null ? null : lookback === 0 ? watermark : new Date(Date.parse(watermark) - lookback).toISOString()
+    let since = watermark
+    if (state.cursor !== null) since = state.runSince === undefined ? watermark : state.runSince
+    else if (watermark !== null && lookback > 0) since = new Date(Date.parse(watermark) - lookback).toISOString()
     let cursor = state.cursor
     let maxSeen = state.maxSeen
     if (watermark !== null && newer(watermark, maxSeen)) maxSeen = watermark
