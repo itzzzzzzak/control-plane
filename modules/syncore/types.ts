@@ -76,13 +76,27 @@ export interface SyncTx {
   setState(state: SyncState): void
 }
 
+export interface SyncLease {
+  sync: string
+  token: string
+  epoch: bigint
+  expiresAt: Date
+}
+
+export class LeaseLostError extends Error {
+  constructor() { super("sync lease expired or ownership was fenced"); this.name = "LeaseLostError" }
+}
+
 export interface SyncStore {
+  acquire(sync: string, ttlMs: number): Promise<SyncLease | null>
+  renew(lease: SyncLease, ttlMs: number): Promise<SyncLease | null>
+  release(lease: SyncLease): Promise<boolean>
   getState(sync: string): Promise<SyncState>
   /** All-or-nothing: if `fn` throws, none of its writes are kept. */
-  transaction<T>(sync: string, fn: (tx: SyncTx) => T | Promise<T>): Promise<T>
+  transaction<T>(sync: string, lease: SyncLease, fn: (tx: SyncTx) => T | Promise<T>): Promise<T>
   getRow(sync: string, id: string): Promise<Row | undefined>
   listConflicts(sync: string): Promise<Conflict[]>
   listDeadLetters(sync: string): Promise<DeadLetter[]>
   /** Remove the dead letters at these positions (used by replay). */
-  removeDeadLetters(sync: string, indexes: number[]): Promise<void>
+  removeDeadLetters(sync: string, lease: SyncLease, indexes: number[]): Promise<void>
 }

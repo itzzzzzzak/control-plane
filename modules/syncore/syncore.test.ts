@@ -58,8 +58,9 @@ test("a run that dies at page 3 resumes from its checkpoint: every record applie
 
 test("the store's transaction is all-or-nothing: a failure inside it keeps nothing", async () => {
   const store = memoryStore()
+  const lease = (await store.acquire("zoho", 30000))!
   await assert.rejects(() =>
-    store.transaction("zoho", (tx) => {
+    store.transaction("zoho", lease, (tx) => {
       tx.putRow({ id: "x", data: {}, baseHash: "h", sourceModifiedAt: T(1), deleted: false })
       tx.setState({ cursor: "100", maxSeen: T(1), watermark: null })
       throw new Error("crash mid-page")
