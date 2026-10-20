@@ -13,6 +13,8 @@ export interface Page {
   records: unknown[]
   /** Opaque cursor for the next page; null on the last page. */
   nextCursor: string | null
+  /** Optional source snapshot boundary. Lets an empty completed window advance safely. */
+  watermark?: string
 }
 
 export interface Source {

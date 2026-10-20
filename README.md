@@ -2,7 +2,7 @@
 
 A self-hostable control plane for reliable agents and automations, built as a **modular monolith**: one repo, one process, one database, with strictly separated modules.
 
-> Status: early. SyncCore implements one-way sync with checkpoints, conflicts, atomic dead-letter replay, PostgreSQL persistence, fenced leases and heartbeat. Real PostgreSQL crash/restart tests run in CI. Incremental boundary correctness and a live Zoho source are subsequent milestones. Part of a Sept to Dec 2026 engineering plan whose capstone combines every module.
+> Status: early. SyncCore implements one-way sync with checkpoints, conflicts, atomic dead-letter replay, PostgreSQL persistence, fenced leases and heartbeat. A ConnectorKit-backed Zoho CRM source now provides bounded COQL reads and deletion tombstones; live sandbox certification is still pending. Part of a Sept to Dec 2026 engineering plan whose capstone combines every module.
 
 [![CI](https://github.com/itzzzzzzak/control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/itzzzzzzak/control-plane/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -32,6 +32,19 @@ pnpm start
 ```
 
 Requires Node 22 or newer. PostgreSQL setup and recovery: [operations guide](docs/modules/syncore-postgres-operations.md). Local tests without `SYNCORE_TEST_DATABASE_URL` skip database integration tests; CI requires them.
+
+### Run the Zoho vertical slice locally
+
+```bash
+docker compose up -d postgres
+cp .env.example .env
+# Add a short-lived Zoho OAuth access token to .env.
+pnpm sync:zoho
+```
+
+On a fresh Docker volume the numbered SyncCore migrations run automatically. Existing
+databases must be migrated explicitly using the operations guide. The container keeps
+its data in the Compose-managed PostgreSQL volume and restarts unless stopped.
 
 ## Contributing
 
