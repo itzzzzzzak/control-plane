@@ -31,3 +31,14 @@
   broad pg_stat_activity queries can interfere with parallel suites.
 - Next source acceptance needs a sandbox. Existing ConnectorKit v0.7.0 listing does
   not expose modified-since; release access and query design must be resolved first.
+
+## 2026-10-20 Zoho source integration
+
+- Installed ConnectorKit from its v0.7.0 release asset and used `coql.query` rather
+  than `records.list` so incremental reads are filtered at the provider.
+- The source cursor freezes one upper boundary across active-record and deletion feeds.
+  A source-provided high-water mark lets an empty window advance without creating a
+  synthetic record.
+- Added a local one-shot runner and persistent PostgreSQL 17 Compose service. Static
+  access-token handling is intentionally an acceptance-stage limitation; refresh-token
+  ownership belongs in connection management rather than SyncCore.

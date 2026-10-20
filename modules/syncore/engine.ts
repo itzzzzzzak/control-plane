@@ -149,6 +149,10 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
         }
       }
       for (const r of valid) if (newer(r.modifiedAt, maxSeen)) maxSeen = r.modifiedAt
+      if (page.watermark !== undefined) {
+        if (Number.isNaN(Date.parse(page.watermark))) return { status: "stopped", stats, error: "source returned an invalid watermark" }
+        if (newer(page.watermark, maxSeen)) maxSeen = page.watermark
+      }
 
       const pageStats: SyncStats = { ...stats, pages: 0 }
       try {

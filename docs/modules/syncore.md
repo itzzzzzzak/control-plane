@@ -1,6 +1,6 @@
 # SyncCore: design
 
-Status: engine and PostgreSQL durability are implemented. See [engineering progress](../engineering-progress.md). Live Zoho source integration remains subsequent work.
+Status: engine, PostgreSQL durability and the ConnectorKit-backed Zoho source are implemented. See [engineering progress](../engineering-progress.md). Live sandbox acceptance remains subsequent work.
 
 ## Problem
 Calling an API is simple. Keeping two systems consistent over time, through crashes, rate limits, duplicate events and concurrent edits, is not.
@@ -29,6 +29,8 @@ Bidirectional sync, more than one source type, a UI.
 **Idempotent apply.** Each row remembers the source's `modifiedAt` and a hash of the data last synced. A record older than the row is skipped; an equal source baseline is skipped even if the row was locally edited. Newer metadata with unchanged source content preserves local edits. Different live payloads at the same instant stop and roll back the page: a timestamp-only source cannot order them. See [Gate 3](syncore-reliability-gate-3.md).
 
 **Full, then incremental.** The first run walks every page. When the last page is done, the greater of the previous watermark and the highest `modifiedAt` seen becomes the **watermark**; the next run asks the source inclusively from that watermark minus a bounded lookback (60 seconds by default, configurable from 0 to 24 hours). The exact query is pinned with unfinished cursors, so a restart or configuration change cannot alter the query associated with the cursor. Events outside that window still require reconciliation. The watermark moves only when a run completes, so a resumed run uses the same `since` as the one it continues.
+
+**Zoho source window.** The Zoho adapter freezes an upper timestamp in its opaque cursor, reads active records with a bounded COQL query, then walks the deleted-record feed using the same window. It reports that upper boundary as the page watermark so even an empty completed window advances safely. ConnectorKit normalizes provider failures; SyncCore owns job-level retry and checkpoint behavior.
 
 **Conflicts (Zoho wins).** If the database row's data no longer matches the hash of what was last synced, someone edited it locally. If the source also changed from its baseline, Zoho's value overwrites it, and the overwritten value is written to the conflict log first.
 

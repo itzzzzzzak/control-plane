@@ -148,6 +148,23 @@ test("the second run is incremental: it asks only for changes since the watermar
   assert.equal((await store.getRow("zoho", "r5"))?.data.phone, "A5-changed")
 })
 
+test("an empty source window advances only to its validated high-water boundary", async () => {
+  const store = memoryStore()
+  const boundary = T(500)
+  const source: Source = { fetchPage: async () => ({ records: [], nextCursor: null, watermark: boundary }) }
+  const result = await runSync({ name: "zoho", source, store })
+  assert.equal(result.status, "completed")
+  assert.equal((await store.getState("zoho")).watermark, boundary)
+
+  const invalid: Source = { fetchPage: async () => ({ records: [], nextCursor: null, watermark: "not-a-date" }) }
+  const stopped = await runSync({ name: "invalid-watermark", source: invalid, store })
+  assert.deepEqual(stopped, {
+    status: "stopped",
+    stats: { pages: 0, created: 0, updated: 0, unchanged: 0, deleted: 0, skipped: 0, conflicts: 0, deadLettered: 0 },
+    error: "source returned an invalid watermark",
+  })
+})
+
 test("rate limits are retried honoring retryAfter; when retries run out the run stops with its checkpoint intact", async () => {
   const store = memoryStore()
   let fails = 2
